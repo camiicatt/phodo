@@ -1,0 +1,12 @@
+{
+  "name": "phodo-tools",
+  "private": true,
+  "description": "Dev tooling only (Supabase CLI). The app itself is Swift.",
+  "scripts": {
+    "db:push": "supabase db push",
+    "db:diff": "supabase db diff"
+  },
+  "devDependencies": {
+    "supabase": "^3.2.0"
+  }
+}

@@ -1,0 +1,97 @@
+import SwiftUI
+
+@main
+struct PhodoApp: App {
+    @State private var store = AppStore()
+
+    var body: some Scene {
+        WindowGroup {
+            ThemedRoot()
+                .environment(store)
+                .task { await store.start() }
+                .onOpenURL { url in Task { await store.handleLink(url) } }
+        }
+    }
+}
+
+/// Builds the `Theme` from the user's color + light/dark mode and hands it to
+/// every screen through the environment.
+struct ThemedRoot: View {
+    @Environment(AppStore.self) private var store
+    @Environment(\.colorScheme) private var scheme
+
+    var body: some View {
+        let theme = Theme(preset: store.theme, isDark: scheme == .dark)
+        Group {
+            switch store.phase {
+            case .loading:
+                ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background(theme.bg.ignoresSafeArea())
+            case .signedOut: AuthView()
+            case .needsProfile: OnboardingView()
+            case .ready: RootTabView()
+            }
+        }
+        .environment(\.theme, theme)
+        .animation(.easeInOut, value: store.themeID)
+        .animation(.easeInOut, value: store.phase)
+    }
+}
+
+enum Tab: String, CaseIterable {
+    case friends, today, profile, boards
+}
+
+struct RootTabView: View {
+    @Environment(\.theme) private var theme
+    @State private var tab: Tab = .today
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Group {
+                switch tab {
+                case .friends: FriendsFeedView()
+                case .today: TodayView()
+                case .profile: ProfileView()
+                case .boards: BoardsView()
+                }
+            }
+            .frame(maxHeight: .infinity)
+            TextTabBar(selection: $tab)
+        }
+        .ignoresSafeArea(.keyboard, edges: .bottom)   // keyboard covers the tab bar instead of pushing it up
+        .background(theme.bg.ignoresSafeArea())
+    }
+}
+
+/// The text-only bottom nav from the mockups.
+struct TextTabBar: View {
+    @Environment(\.theme) private var theme
+    @Binding var selection: Tab
+
+    var body: some View {
+        VStack(spacing: 12) {
+            InkLine()
+            HStack {
+                ForEach(Tab.allCases, id: \.self) { tab in
+                    Button { selection = tab } label: {
+                        VStack(spacing: 4) {
+                            Text(tab.rawValue)
+                                .font(selection == tab ? PhFont.bold(20) : PhFont.body(20))
+                                .foregroundStyle(selection == tab ? theme.ink : theme.softInk)
+                            Rectangle().fill(selection == tab ? theme.ink : .clear).frame(height: 2)
+                        }
+                        .fixedSize()
+                        .frame(minHeight: 44)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityAddTraits(selection == tab ? .isSelected : [])
+                    if tab != Tab.allCases.last { Spacer() }
+                }
+            }
+        }
+        .padding(.horizontal, Metrics.margin)
+        .padding(.bottom, 4)
+        .background(theme.bg)
+    }
+}

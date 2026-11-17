@@ -1,0 +1,6 @@
+// Shared build settings. Real values live in Secrets.xcconfig (git-ignored).
+// Note: xcconfig treats "//" as a comment, so we store the host, not the full URL.
+SUPABASE_HOST =
+SUPABASE_KEY =
+
+#include? "Secrets.xcconfig"
