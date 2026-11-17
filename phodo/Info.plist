@@ -22,7 +22,7 @@
 	<array>
 		<dict>
 			<key>CFBundleURLName</key>
-			<string>com.camiicatt.phodo</string>
+			<string>app.phodo</string>
 			<key>CFBundleURLSchemes</key>
 			<array>
 				<string>phodo</string>
@@ -31,6 +31,8 @@
 	</array>
 	<key>CFBundleVersion</key>
 	<string>$(CURRENT_PROJECT_VERSION)</string>
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
 	<key>NSCameraUsageDescription</key>
 	<string>so you can snap today's pic.</string>
 	<key>SupabaseHost</key>

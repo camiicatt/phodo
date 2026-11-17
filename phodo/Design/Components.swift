@@ -10,9 +10,12 @@ struct ScreenHeader: View {
     var body: some View {
         VStack(spacing: 14) {
             HStack(alignment: .lastTextBaseline) {
+                // never break the title mid-word ("toda / y"); shrink instead
                 Text(title).font(PhFont.title(52)).foregroundStyle(theme.ink)
-                Spacer()
+                    .lineLimit(1).minimumScaleFactor(0.5).layoutPriority(1)
+                Spacer(minLength: 8)
                 Text(trailing).font(PhFont.mono(14)).foregroundStyle(theme.softInk)
+                    .lineLimit(1)
             }
             InkLine()
         }
@@ -142,6 +145,34 @@ struct PhotoTile: View {
             .clipShape(RoundedRectangle(cornerRadius: Metrics.radius, style: .continuous))
             .overlay(RoundedRectangle(cornerRadius: Metrics.radius, style: .continuous)
                 .stroke(theme.ink, lineWidth: Metrics.line))
+    }
+}
+
+/// Round profile picture, or the first letter of the username.
+struct Avatar: View {
+    @Environment(\.theme) private var theme
+    let person: Person
+    var size: CGFloat = 32
+
+    var body: some View {
+        Circle().fill(theme.photoTint)
+            .frame(width: size, height: size)
+            .overlay {
+                if let url = person.avatarURL {
+                    AsyncImage(url: url) { phase in
+                        if let image = phase.image { image.resizable().scaledToFill() } else { initial }
+                    }
+                } else {
+                    initial
+                }
+            }
+            .clipShape(Circle())
+            .overlay(Circle().stroke(theme.ink, lineWidth: Metrics.line))
+            .accessibilityHidden(true)
+    }
+
+    private var initial: some View {
+        Text(String(person.username.prefix(1))).font(PhFont.title(size * 0.45)).foregroundStyle(theme.ink)
     }
 }
 

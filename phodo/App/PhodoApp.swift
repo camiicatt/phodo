@@ -18,10 +18,9 @@ struct PhodoApp: App {
 /// every screen through the environment.
 struct ThemedRoot: View {
     @Environment(AppStore.self) private var store
-    @Environment(\.colorScheme) private var scheme
 
     var body: some View {
-        let theme = Theme(preset: store.theme, isDark: scheme == .dark)
+        let theme = Theme(preset: store.theme)
         Group {
             switch store.phase {
             case .loading:
@@ -33,6 +32,8 @@ struct ThemedRoot: View {
             }
         }
         .environment(\.theme, theme)
+        // The user's theme decides light/dark, so the keyboard, pickers and status bar match it.
+        .preferredColorScheme(theme.isDark ? .dark : .light)
         .animation(.easeInOut, value: store.themeID)
         .animation(.easeInOut, value: store.phase)
     }

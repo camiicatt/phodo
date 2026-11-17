@@ -1,0 +1,24 @@
+@import url("https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:wght@400;800&family=DM+Mono&display=swap");
+
+:root { --bg: #DCD5F5; --card: #F3F0FD; --ink: #1C1A27; --soft: #4A4560; }
+@media (prefers-color-scheme: dark) {
+  :root { --bg: #17141F; --card: #221E2C; --ink: #F1EFF8; --soft: #B8B2CC; }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink);
+  font: 17px/1.55 "Bricolage Grotesque", system-ui, sans-serif; }
+main { max-width: 640px; margin: 0 auto; padding: 40px 22px 80px; }
+h1 { font-weight: 800; font-size: 56px; letter-spacing: -0.03em; margin: 24px 0 4px; line-height: 1; }
+h2 { font-weight: 800; font-size: 22px; margin: 36px 0 8px; padding-top: 16px; border-top: 1px solid var(--ink); }
+.meta, .mono { font-family: "DM Mono", ui-monospace, monospace; font-size: 14px; color: var(--soft); }
+.home { display: inline-flex; align-items: center; gap: 10px; color: var(--ink); text-decoration: none;
+  font-family: "DM Mono", ui-monospace, monospace; }
+.home img { border-radius: 12px; border: 1px solid var(--ink); }
+a { color: var(--ink); }
+ul { padding-left: 20px; }
+li { margin: 6px 0; }
+.big { font-weight: 800; font-size: 72px; letter-spacing: -0.04em; line-height: 0.95; margin: 40px 0 12px; }
+.pill { display: inline-block; padding: 12px 22px; border-radius: 999px; background: var(--ink); color: var(--bg);
+  text-decoration: none; font-weight: 800; margin-top: 16px; }
+footer { margin-top: 60px; font-family: "DM Mono", ui-monospace, monospace; font-size: 13px; color: var(--soft); }
+footer a { color: var(--soft); margin-right: 14px; }

@@ -47,6 +47,8 @@ protocol AccountService {
     func isAvailable(username: String) async throws -> Bool
     func createProfile(_ person: Person) async throws
     func updateProfile(_ person: Person) async throws
+    /// Uploads a square JPEG as the profile picture; returns the updated person.
+    func setAvatar(_ jpeg: Data, for person: Person) async throws -> Person
     func signOut() async throws
     /// Deletes photos, then the account (posts, friends, boards cascade).
     func deleteAccount() async throws
@@ -67,6 +69,7 @@ final class SupabaseAccountService: AccountService {
         var location: String
         var theme: String
         var is_13_plus: Bool?
+        var avatar_path: String?
     }
 
     private struct IDRow: Decodable { let id: UUID }
@@ -93,10 +96,14 @@ final class SupabaseAccountService: AccountService {
 
     func profile(_ id: UUID) async throws -> Person? {
         let rows: [ProfileRow] = try await client.from("profiles").select().eq("id", value: id).execute().value
-        return rows.first.map {
-            Person(id: $0.id, username: $0.username, displayName: $0.display_name,
-                   bio: $0.bio, location: $0.location, theme: $0.theme)
+        guard let r = rows.first else { return nil }
+        var p = Person(id: r.id, username: r.username, displayName: r.display_name,
+                       bio: r.bio, location: r.location, theme: r.theme)
+        p.avatarPath = r.avatar_path
+        if let path = r.avatar_path {
+            p.avatarURL = try? await Signer.sign(client, bucket: "avatars", paths: [path])[path]
         }
+        return p
     }
 
     func isAvailable(username: String) async throws -> Bool {
@@ -117,6 +124,19 @@ final class SupabaseAccountService: AccountService {
         try await client.from("profiles").update(row(p, adult: nil)).eq("id", value: p.id).execute()
     }
 
+    func setAvatar(_ jpeg: Data, for person: Person) async throws -> Person {
+        // New file name each time, so cached old pictures never show up.
+        let path = "\(person.id.lower)/avatar-\(Int(Date().timeIntervalSince1970)).jpg"
+        _ = try await client.storage.from("avatars").upload(path, data: jpeg, options: FileOptions(contentType: "image/jpeg"))
+        var p = person
+        let old = p.avatarPath
+        p.avatarPath = path
+        try await updateProfile(p)
+        if let old { _ = try? await client.storage.from("avatars").remove(paths: [old]) }
+        p.avatarURL = try await Signer.sign(client, bucket: "avatars", paths: [path])[path]
+        return p
+    }
+
     func signOut() async throws { try await client.auth.signOut() }
 
     func deleteAccount() async throws {
@@ -126,6 +146,10 @@ final class SupabaseAccountService: AccountService {
             .eq("user_id", value: uid).execute().value
         let paths = rows.flatMap { [$0.image_path, $0.thumb_path] }.compactMap { $0 }
         if !paths.isEmpty { _ = try await client.storage.from("posts").remove(paths: paths) }
+        let avatars = (try? await client.storage.from("avatars").list(path: uid.lower)) ?? []
+        if !avatars.isEmpty {
+            _ = try? await client.storage.from("avatars").remove(paths: avatars.map { "\(uid.lower)/\($0.name)" })
+        }
         // 2. the account itself; profile/posts/friends/boards cascade
         try await client.rpc("delete_my_account").execute()
         try? await client.auth.signOut()
@@ -133,7 +157,7 @@ final class SupabaseAccountService: AccountService {
 
     private func row(_ p: Person, adult: Bool?) -> ProfileRow {
         ProfileRow(id: p.id, username: p.username, display_name: p.displayName,
-                   bio: p.bio, location: p.location, theme: p.theme, is_13_plus: adult)
+                   bio: p.bio, location: p.location, theme: p.theme, is_13_plus: adult, avatar_path: p.avatarPath)
     }
 }
 
@@ -160,6 +184,15 @@ final class MockAccountService: AccountService {
         profiles[p.id] = p
     }
     func updateProfile(_ p: Person) async throws { profiles[p.id] = p }
+    func setAvatar(_ jpeg: Data, for person: Person) async throws -> Person {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("avatar-\(UUID().uuidString).jpg")
+        try jpeg.write(to: url)
+        var p = person
+        p.avatarPath = url.lastPathComponent
+        p.avatarURL = url
+        profiles[p.id] = p
+        return p
+    }
     func signOut() async throws {}
     func deleteAccount() async throws {}
 }

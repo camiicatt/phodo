@@ -23,7 +23,13 @@ This is the map of the app: what each piece does, how a post moves from your cam
 | `SupabaseAccountService` + `SupabasePostService` (real upload, feed, signed links) | ✅ written, needs your project keys to run |
 | Supabase schema + privacy rules (`0001`, `0002`) | 📝 written, not applied yet |
 | Sign in with Apple | ⏳ after email sign-in works |
-| Boards in Supabase | ⏳ still local-only |
+| Boards in Supabase (create, rename, delete, save/unsave) | ✅ |
+| Multiple posts a day + filling in missed days (no future) | ✅ migration `0003` |
+| Friends: search by @username, requests, accept/decline, remove, invite link | ✅ |
+| Explore: posts shared with "everyone" | ✅ |
+| Long-press any post: save to board · add friend · report · block · delete | ✅ |
+| Profile pictures (square, 512px, private `avatars` bucket) | ✅ |
+| Light *and* dark color presets (phodo ignores the phone's dark mode) | ✅ see `docs/images/theme-gallery.png` |
 | Friend requests UI, reactions, comments, report/block UI | ⏳ |
 | Bundled fonts (Bricolage Grotesque, DM Mono) | ⏳ falls back to system fonts |
 
@@ -423,6 +429,19 @@ The code is done. These steps connect it to your project:
 - 13+ age gate at sign-up.
 - Join the App Store Small Business Program (15% fee instead of 30%).
 
-### Things to decide
-- **Bundle ID** is currently `com.camiicatt.phodo` (in `project.yml`). It's permanent after your first upload, so change it now if you want something else.
-- Set `DEVELOPMENT_TEAM` in `project.yml` to your Apple team ID so it runs on your own phone.
+### Getting it on phones
+- **Bundle ID:** `app.phodo` (phodo.app reversed). It's permanent after the first upload.
+- **Signing:** automatic. Put your 10-character Team ID in `DEVELOPMENT_TEAM` in `project.yml`, then run `xcodegen generate`.
+- **Icon:** `phodo/Assets.xcassets/AppIcon.appiconset/icon-1024.png` (placeholder sleepy cat). It's drawn by a script, so swap in a real one anytime.
+- `ITSAppUsesNonExemptEncryption = false` skips the export-compliance question on every upload, because phodo only uses standard HTTPS.
+
+**Your phone:** sign in to Xcode → Settings → Accounts, turn on Developer Mode on the phone, plug it in, pick it in Xcode, and press ⌘R.
+
+**Friends (TestFlight):**
+1. App Store Connect → My Apps → + New App (name `phodo`, bundle `app.phodo`, SKU `phodo`).
+2. Xcode → Product → Archive → Distribute App → App Store Connect → Upload. Bump `CURRENT_PROJECT_VERSION` for every upload.
+3. TestFlight → External Testing → new group → add the build → feedback email `hi@phodo.app`, privacy URL `https://phodo.app/privacy`.
+4. Beta review takes about a day the first time. Then turn on the public link and share it.
+
+### Website (`site/`)
+`index.html` (landing + beta signup by email), `privacy.html`, `style.css`, `icon.png`. Static files, so host them free on **Cloudflare Pages**: Workers & Pages → Create → Pages → Upload assets → pick the `site` folder → then Custom domains → `phodo.app`.

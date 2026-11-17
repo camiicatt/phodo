@@ -2,14 +2,19 @@ import Supabase
 import SwiftUI
 
 /// The real backend: photos → private storage bucket, posts → Postgres.
-/// Privacy is enforced by the row-level security in supabase/migrations.
+/// Who-can-see-what is enforced by row-level security (supabase/migrations).
 @MainActor
 final class SupabasePostService: PostService {
     private let client: SupabaseClient
     private let bucket = "posts"
     init(client: SupabaseClient) { self.client = client }
 
-    private struct AuthorRow: Decodable { let id: UUID; let username: String; let display_name: String }
+    struct AuthorRow: Decodable {
+        let id: UUID
+        let username: String
+        let display_name: String
+        let avatar_path: String?
+    }
 
     private struct PostRow: Decodable {
         let id: UUID
@@ -23,6 +28,7 @@ final class SupabasePostService: PostService {
         let height: Int?
         let tint: String?
         let visibility: String
+        let created_at: Date?
         let author: AuthorRow?
     }
 
@@ -40,35 +46,56 @@ final class SupabasePostService: PostService {
         let visibility: String
     }
 
+    private static let select = "*, author:profiles(id, username, display_name, avatar_path)"
     private var myID: UUID? { client.auth.currentUser?.id }
 
     // MARK: reads
 
     func myPosts(_ me: Person) async throws -> [Post] {
-        let rows: [PostRow] = try await client.from("posts").select()
-            .eq("user_id", value: me.id).order("local_date", ascending: false).execute().value
-        return try await posts(from: rows, fallbackAuthor: me)
+        let rows: [PostRow] = try await client.from("posts").select(Self.select)
+            .eq("user_id", value: me.id)
+            .order("local_date", ascending: false).order("created_at", ascending: false)
+            .execute().value
+        return try await posts(from: rows)
     }
 
-    func friendsFeed(on day: LocalDay) async throws -> [Post] {
-        // RLS already limits this to: friends' "friends" posts (+ my own, filtered out below).
-        let rows: [PostRow] = try await client.from("posts")
-            .select("*, author:profiles(id, username, display_name)")
-            .eq("local_date", value: day.key)
+    func feed(from authors: [UUID], since: Date) async throws -> [Post] {
+        guard !authors.isEmpty else { return [] }
+        let rows: [PostRow] = try await client.from("posts").select(Self.select)
+            .in("user_id", values: authors.map(\.lower))
+            .gte("created_at", value: since.ISO8601Format())
             .order("created_at", ascending: false)
             .execute().value
-        return try await posts(from: rows.filter { $0.user_id != myID }, fallbackAuthor: nil)
+        return try await posts(from: rows)
+    }
+
+    func explore() async throws -> [Post] {
+        guard let myID else { return [] }
+        let rows: [PostRow] = try await client.from("posts").select(Self.select)
+            .eq("visibility", value: PostVisibility.everyone.rawValue)
+            .neq("user_id", value: myID.lower)
+            .order("created_at", ascending: false)
+            .limit(60)
+            .execute().value
+        return try await posts(from: rows)
+    }
+
+    func posts(ids: [UUID]) async throws -> [Post] {
+        guard !ids.isEmpty else { return [] }
+        let rows: [PostRow] = try await client.from("posts").select(Self.select)
+            .in("id", values: ids.map(\.lower)).execute().value
+        return try await posts(from: rows)
     }
 
     // MARK: writes
 
-    func createPost(_ draft: PostDraft, by me: Person, on day: LocalDay) async throws -> Post {
-        guard !draft.isEmpty else { throw PostError.empty }
+    func createPost(_ draft: PostDraft, by me: Person) async throws -> Post {
+        try draft.validate()
         let id = UUID()
         var uploaded: [String] = []
         var thumbPath: String?, fullPath: String?
 
-        // 1. upload photo (thumb first so the feed can show it soonest)
+        // 1. upload the photo (thumb first so feeds can show it soonest)
         if let photo = draft.photo {
             let folder = "\(me.id.lower)/\(id.lower)"
             thumbPath = "\(folder)/thumb.jpg"
@@ -80,8 +107,8 @@ final class SupabasePostService: PostService {
             uploaded.append(fullPath!)
         }
 
-        // 2. insert the row. UNIQUE(user_id, local_date) = one post a day.
-        let row = NewPost(id: id, user_id: me.id, local_date: day.key,
+        // 2. insert the row
+        let row = NewPost(id: id, user_id: me.id, local_date: draft.day.key,
                           caption: draft.caption, tags: draft.tags,
                           image_path: fullPath, thumb_path: thumbPath,
                           width: draft.photo?.width, height: draft.photo?.height,
@@ -91,11 +118,10 @@ final class SupabasePostService: PostService {
         } catch {
             // 3. undo the upload so no orphaned files are left behind
             if !uploaded.isEmpty { _ = try? await client.storage.from(bucket).remove(paths: uploaded) }
-            if isUniqueViolation(error) { throw PostError.alreadyPostedToday }
             throw error
         }
 
-        var post = Post(id: id, author: me, day: day, caption: draft.caption, tags: draft.tags,
+        var post = Post(id: id, author: me, day: draft.day, caption: draft.caption, tags: draft.tags,
                         visibility: draft.visibility, image: draft.photo?.preview,
                         aspect: draft.photo?.aspect ?? 0.6,
                         tint: draft.photo.map { Color(uiColor: $0.tint) })
@@ -115,28 +141,42 @@ final class SupabasePostService: PostService {
 
     // MARK: helpers
 
-    /// Rows → Posts, with temporary (1 hour) links for the thumbnails.
-    private func posts(from rows: [PostRow], fallbackAuthor: Person?) async throws -> [Post] {
-        let thumbPaths = rows.compactMap(\.thumb_path)
-        var urls: [String: URL] = [:]
-        if !thumbPaths.isEmpty {
-            for result in try await client.storage.from(bucket).createSignedURLs(paths: thumbPaths, expiresIn: 3600) {
-                if case let .success(path, url) = result { urls[path] = url }
-            }
-        }
+    /// Rows → Posts, with temporary (1 hour) links for photos and avatars.
+    private func posts(from rows: [PostRow]) async throws -> [Post] {
+        let photoURLs = try await Signer.sign(client, bucket: bucket,
+                                              paths: rows.flatMap { [$0.thumb_path, $0.image_path] }.compactMap { $0 })
+        let avatarURLs = try await Signer.sign(client, bucket: "avatars",
+                                               paths: rows.compactMap { $0.author?.avatar_path })
         return rows.compactMap { r in
             guard let day = LocalDay(key: r.local_date) else { return nil }
-            let author = r.author.map { Person(id: $0.id, username: $0.username, displayName: $0.display_name) }
-                ?? fallbackAuthor ?? Person(id: r.user_id, username: "someone", displayName: "")
+            var author = Person(id: r.user_id, username: r.author?.username ?? "someone",
+                                displayName: r.author?.display_name ?? "")
+            author.avatarPath = r.author?.avatar_path
+            author.avatarURL = r.author?.avatar_path.flatMap { avatarURLs[$0] }
             var post = Post(id: r.id, author: author, day: day, caption: r.caption, tags: r.tags,
                             visibility: PostVisibility(rawValue: r.visibility) ?? .friends,
                             image: nil,
                             aspect: CGFloat(r.height ?? 3) / CGFloat(max(r.width ?? 5, 1)),
                             tint: Color(hex: r.tint))
-            post.thumbURL = r.thumb_path.flatMap { urls[$0] }
+            post.thumbURL = r.thumb_path.flatMap { photoURLs[$0] }
+            post.fullURL = r.image_path.flatMap { photoURLs[$0] }
             post.paths = [r.thumb_path, r.image_path].compactMap { $0 }
             post.hasPhoto = r.thumb_path != nil
+            post.createdAt = r.created_at ?? Date()
             return post
         }
+    }
+}
+
+/// Batch-creates temporary links for private storage files.
+enum Signer {
+    static func sign(_ client: SupabaseClient, bucket: String, paths: [String]) async throws -> [String: URL] {
+        let unique = Array(Set(paths))
+        guard !unique.isEmpty else { return [:] }
+        var urls: [String: URL] = [:]
+        for result in try await client.storage.from(bucket).createSignedURLs(paths: unique, expiresIn: 3600) {
+            if case let .success(path, url) = result { urls[path] = url }
+        }
+        return urls
     }
 }

@@ -1,115 +1,202 @@
 import SwiftUI
 
-/// Screen 2 — friends' posts from today in a masonry feed that ends.
+/// Tab 1: your friends' posts from the last day, or explore (posts shared with "everyone").
 struct FriendsFeedView: View {
     @Environment(AppStore.self) private var store
     @Environment(\.theme) private var theme
-    @State private var saving: Post?
+    @AppStorage("feedMode") private var mode = 0   // 0 friends, 1 explore
+    @State private var showFriends = false
 
     var body: some View {
         ScrollView {
-            VStack(spacing: 22) {
-                ScreenHeader(title: "friends", trailing: store.feed.isEmpty ? "" : "\(store.feed.count) new")
+            VStack(spacing: 18) {
+                ScreenHeader(title: mode == 0 ? "friends" : "explore",
+                             trailing: mode == 0 && !store.feed.isEmpty ? "\(store.feed.count) new" : "")
 
-                if store.feed.isEmpty {
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text("no one's posted yet").font(PhFont.bold(24))
-                        Text("you go first ✌︎").font(PhFont.mono(14)).foregroundStyle(theme.softInk)
+                HStack(spacing: 10) {
+                    PillToggle(options: ["friends", "explore"], selection: $mode)
+                    Spacer(minLength: 0)
+                    Button { showFriends = true } label: {
+                        TagChip(text: store.incoming.isEmpty ? "+ add" : "\(store.incoming.count) new ✦",
+                                selected: !store.incoming.isEmpty)
                     }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                } else {
-                    Masonry(items: store.feed, weight: { $0.aspect + 0.45 }) { post in
-                        PostCard(post: post, showAuthor: true, onSave: { saving = post })
-                    }
-                    VStack(alignment: .leading, spacing: 4) {
-                        InkLine()
-                        Text("that's everyone ✌︎").font(PhFont.bold(24)).padding(.top, 10)
-                        Text("go touch grass").font(PhFont.mono(14)).foregroundStyle(theme.softInk)
-                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(store.incoming.isEmpty ? "find friends" : "\(store.incoming.count) friend requests")
                 }
+
+                if mode == 0 { friendsFeed } else { exploreFeed }
             }
             .foregroundStyle(theme.ink)
             .padding(.top, 12).padding(.bottom, 24)
         }
         .refreshable { await store.load() }
         .phodoPage()
-        .sheet(item: $saving) { post in
-            SaveToBoardSheet(post: post).environment(\.theme, theme).presentationDetents([.medium])
+        .sheet(isPresented: $showFriends) {
+            FriendFinder().environment(\.theme, theme).presentationDetents([.large])
         }
     }
-}
 
-/// One card in a masonry grid (feed, profile pics, boards).
-struct PostCard: View {
-    @Environment(AppStore.self) private var store
-    @Environment(\.theme) private var theme
-    let post: Post
-    var showAuthor = false
-    var showDate = false
-    var onSave: (() -> Void)? = nil
+    @ViewBuilder
+    private var friendsFeed: some View {
+        if store.friends.isEmpty {
+            emptyState(title: "it's quiet in here", note: "phodo is better with your people",
+                       button: "find friends") { showFriends = true }
+        } else if store.feed.isEmpty {
+            emptyState(title: "no one's posted yet", note: "you go first ✌︎", button: nil) {}
+        } else {
+            Masonry(items: store.feed, weight: { ($0.hasPhoto ? $0.aspect : 0.2) + 0.45 }) { post in
+                PostCard(post: post, showAuthor: true)
+            }
+            endNote("that's everyone ✌︎", "go touch grass")
+        }
+    }
 
-    var body: some View {
+    @ViewBuilder
+    private var exploreFeed: some View {
+        if store.explore.isEmpty {
+            emptyState(title: "nothing to explore yet",
+                       note: "posts people share with \"everyone\" show up here", button: nil) {}
+        } else {
+            Masonry(items: store.explore, weight: { ($0.hasPhoto ? $0.aspect : 0.2) + 0.45 }) { post in
+                PostCard(post: post, showAuthor: true)
+            }
+            endNote("that's all for now", "hold a post to save it or add someone")
+        }
+    }
+
+    private func emptyState(title: String, note: String, button: String?, action: @escaping () -> Void) -> some View {
         VStack(alignment: .leading, spacing: 8) {
-            if post.hasPhoto {
-                PhotoTile(image: post.image, url: post.thumbURL, tint: post.tint, aspect: post.aspect,
-                          seed: post.id.hashValue)
-            }
-            if showAuthor || onSave != nil {
-                HStack {
-                    if showAuthor { Text(post.author.username).font(PhFont.bold(19)) }
-                    Spacer()
-                    if let onSave {
-                        Button(action: onSave) {
-                            Image(systemName: store.isSaved(post.id) ? "bookmark.fill" : "bookmark")
-                                .font(.system(size: 18, weight: .light))
-                                .frame(width: 44, height: 32, alignment: .trailing)
-                        }
-                        .buttonStyle(.plain)
-                        .accessibilityLabel("save to board")
-                    }
-                }
-            }
-            if !post.caption.isEmpty { Text(post.caption).font(PhFont.body(17)) }
-            let meta = ([showDate ? post.day.short : nil] + post.tags.map { "#\($0)" }).compactMap { $0 }
-            if !meta.isEmpty {
-                Text(meta.joined(separator: showDate ? " · " : " ")).font(PhFont.mono(12)).foregroundStyle(theme.softInk)
+            Text(title).font(PhFont.bold(24))
+            Text(note).font(PhFont.mono(14)).foregroundStyle(theme.softInk)
+            if let button {
+                Button(button, action: action).buttonStyle(PrimaryButtonStyle()).padding(.top, 10)
             }
         }
-        .foregroundStyle(theme.ink)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func endNote(_ title: String, _ note: String) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            InkLine()
+            Text(title).font(PhFont.bold(24)).padding(.top, 10)
+            Text(note).font(PhFont.mono(14)).foregroundStyle(theme.softInk)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
-struct SaveToBoardSheet: View {
+/// Search by @username, answer requests, see your friends, invite people.
+struct FriendFinder: View {
     @Environment(AppStore.self) private var store
     @Environment(\.theme) private var theme
     @Environment(\.dismiss) private var dismiss
-    let post: Post
-    @State private var newName = ""
+    @State private var query = ""
+    @State private var results: [Person] = []
+    @State private var searching = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            Text("save to…").font(PhFont.title(32))
-            FlowLayout(spacing: 10) {
-                ForEach(store.boards) { board in
-                    Button { store.toggle(post.id, in: board.id) } label: {
-                        TagChip(text: "#\(board.name)", selected: board.postIDs.contains(post.id))
+        ScrollView {
+            VStack(alignment: .leading, spacing: 20) {
+                HStack {
+                    Text("your people").font(PhFont.title(34))
+                    Spacer()
+                    Button("done") { dismiss() }.font(PhFont.bold(17))
+                }
+
+                VStack(spacing: 8) {
+                    HStack {
+                        Text("@").font(PhFont.body(20)).foregroundStyle(theme.softInk)
+                        TextField("", text: $query, prompt: Text("find by username").foregroundStyle(theme.softInk.opacity(0.7)))
+                            .font(PhFont.body(20)).textInputAutocapitalization(.never).autocorrectionDisabled()
+                        if searching { ProgressView() }
                     }
-                    .buttonStyle(.plain)
+                    InkLine()
                 }
-            }
-            HStack {
-                TextField("new board", text: $newName).font(PhFont.mono(15)).textInputAutocapitalization(.never)
-                Button("+ new") {
-                    if let b = store.createBoard(named: newName) { store.toggle(post.id, in: b.id) }
-                    newName = ""
+                .task(id: query) { await runSearch() }
+
+                if !query.isEmpty {
+                    if results.isEmpty && !searching {
+                        Text("no one called @\(Username.clean(query)) yet").font(PhFont.mono(13)).foregroundStyle(theme.softInk)
+                    }
+                    ForEach(results) { person in row(person) }
                 }
-                .font(PhFont.mono(15))
+
+                if !store.incoming.isEmpty {
+                    FieldLabel("asked to be friends")
+                    ForEach(store.incoming) { c in row(c.person) }
+                }
+
+                FieldLabel("friends · \(store.friends.count)")
+                if store.friends.isEmpty {
+                    Text("no friends yet. search above or send an invite")
+                        .font(PhFont.mono(13)).foregroundStyle(theme.softInk)
+                }
+                ForEach(store.friends) { c in row(c.person) }
+
+                let waiting = store.connections.filter { $0.status == .outgoing }
+                if !waiting.isEmpty {
+                    FieldLabel("waiting on them")
+                    ForEach(waiting) { c in row(c.person) }
+                }
+
+                InkLine()
+                ShareLink(item: URL(string: "https://phodo.app")!,
+                          message: Text("add me on phodo, i'm @\(store.me.username) 🐈 one pic a day, just for your people")) {
+                    Text("invite people to phodo").frame(maxWidth: .infinity)
+                }
+                .buttonStyle(OutlineButtonStyle())
             }
-            InkLine()
-            Button("done") { dismiss() }.buttonStyle(PrimaryButtonStyle())
+            .foregroundStyle(theme.ink)
+            .padding(.top, 24).padding(.bottom, 24)
         }
-        .foregroundStyle(theme.ink)
-        .padding(.top, 28)
+        .scrollDismissesKeyboard(.interactively)
         .phodoPage()
+    }
+
+    private func row(_ person: Person) -> some View {
+        HStack(spacing: 12) {
+            Avatar(person: person, size: 44)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("@\(person.username)").font(PhFont.bold(17))
+                if !person.displayName.isEmpty && person.displayName != person.username {
+                    Text(person.displayName).font(PhFont.mono(13)).foregroundStyle(theme.softInk)
+                }
+            }
+            Spacer()
+            action(for: person)
+        }
+    }
+
+    @ViewBuilder
+    private func action(for person: Person) -> some View {
+        switch store.status(of: person.id) {
+        case nil:
+            Button { Task { await store.addFriend(person) } } label: { TagChip(text: "add", selected: true) }
+                .buttonStyle(.plain)
+        case .outgoing:
+            Button { Task { await store.removeConnection(person.id) } } label: { TagChip(text: "requested") }
+                .buttonStyle(.plain).accessibilityHint("cancels the request")
+        case .incoming:
+            HStack(spacing: 6) {
+                Button { Task { await store.accept(person.id) } } label: { TagChip(text: "accept", selected: true) }
+                Button { Task { await store.removeConnection(person.id) } } label: { TagChip(text: "✕", dashed: true) }
+                    .accessibilityLabel("decline")
+            }
+            .buttonStyle(.plain)
+        case .friends:
+            Menu {
+                Button("remove friend", role: .destructive) { Task { await store.removeConnection(person.id) } }
+            } label: { TagChip(text: "friends ✓") }
+        }
+    }
+
+    private func runSearch() async {
+        let q = Username.clean(query)
+        guard !q.isEmpty else { results = []; return }
+        try? await Task.sleep(for: .milliseconds(300))   // wait until they stop typing
+        guard !Task.isCancelled else { return }
+        searching = true
+        results = await store.search(q)
+        searching = false
     }
 }

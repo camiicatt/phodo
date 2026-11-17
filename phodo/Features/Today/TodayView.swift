@@ -1,10 +1,15 @@
 import PhotosUI
 import SwiftUI
 
-/// Screen 1 — post today's moment. One post per day.
+/// Tab 2: post a moment. At least one a day is the goal; more is fine,
+/// and you can fill in days you missed.
 struct TodayView: View {
     @Environment(AppStore.self) private var store
     @Environment(\.theme) private var theme
+
+    // which day this post is for
+    @State private var forDate = Date()
+    private var day: LocalDay { LocalDay(forDate) }
 
     // photo
     @State private var pickerItem: PhotosPickerItem?
@@ -19,21 +24,22 @@ struct TodayView: View {
     @State private var selectedTags: [String] = []
     @State private var addingTag = false
     @State private var newTag = ""
-    @State private var visibility = 0               // 0 friends, 1 just me
+    @State private var visibility = 0               // 0 friends, 1 everyone, 2 just me
     @FocusState private var captionFocused: Bool
 
     @State private var isPosting = false
     @State private var errorText: String?
+    @State private var justPosted = false
+
+    private let visibilities: [PostVisibility] = [.friends, .everyone, .justMe]
 
     var body: some View {
         ScrollView {
-            VStack(spacing: 24) {
-                ScreenHeader(title: "today", trailing: LocalDay.today.header)
-                if let post = store.todaysPost {
-                    PostedToday(post: post)
-                } else {
-                    composer
-                }
+            VStack(spacing: 22) {
+                ScreenHeader(title: day == .today ? "today" : day.short, trailing: day.header)
+                status
+                composer
+                dayPosts
             }
             .padding(.top, 12).padding(.bottom, 24)
         }
@@ -59,10 +65,38 @@ struct TodayView: View {
         }
     }
 
+    // MARK: status + day picker
+
+    private var status: some View {
+        let count = store.myPosts.filter { $0.day == day }.count
+        return VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .firstTextBaseline) {
+                if count == 0 {
+                    Text(day == .today ? "nothing yet today. one is all you need ☾" : "you missed this one. fill it in?")
+                } else {
+                    Text("\(day == .today ? "today's" : "this day's") done ✓ · add more anytime")
+                }
+            }
+            .font(PhFont.mono(13)).foregroundStyle(theme.softInk)
+
+            HStack(spacing: 10) {
+                Text("for").font(PhFont.mono(14)).foregroundStyle(theme.softInk)
+                DatePicker("posting for", selection: $forDate, in: ...Date(), displayedComponents: .date)
+                    .labelsHidden()
+                if day != .today {
+                    Button { forDate = Date() } label: { TagChip(text: "back to today", dashed: true) }
+                        .buttonStyle(.plain)
+                }
+                Spacer(minLength: 0)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
     // MARK: composer
 
     private var composer: some View {
-        VStack(spacing: 24) {
+        VStack(spacing: 22) {
             dropZone
 
             VStack(spacing: 10) {
@@ -96,19 +130,30 @@ struct TodayView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
 
+            VStack(spacing: 10) {
+                FieldLabel("who sees it")
+                HStack {
+                    PillToggle(options: visibilities.map(\.label), selection: $visibility)
+                    Spacer(minLength: 0)
+                }
+                if visibilities[visibility] == .everyone {
+                    Text("anyone on phodo can see this in explore")
+                        .font(PhFont.mono(12)).foregroundStyle(theme.softInk)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+
             if let errorText {
                 Text(errorText).font(PhFont.mono(13)).foregroundStyle(theme.ink)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
 
-            HStack(spacing: 14) {
-                PillToggle(options: ["friends", "just me"], selection: $visibility)
-                Button { Task { await post() } } label: {
-                    if isPosting { ProgressView().tint(theme.bg) } else { Text("post it") }
-                }
-                .buttonStyle(PrimaryButtonStyle())
-                .disabled(isPosting || (edited == nil && caption.trimmingCharacters(in: .whitespaces).isEmpty))
+            Button { Task { await post() } } label: {
+                if isPosting { ProgressView().tint(theme.bg) }
+                else { Text(justPosted ? "posted ✓" : (day == .today ? "post it" : "post for \(day.short)")) }
             }
+            .buttonStyle(PrimaryButtonStyle())
+            .disabled(isPosting || (edited == nil && caption.trimmingCharacters(in: .whitespaces).isEmpty))
         }
     }
 
@@ -127,24 +172,44 @@ struct TodayView: View {
         } else {
             VStack(spacing: 14) {
                 Image(systemName: "plus.circle").font(.system(size: 40, weight: .thin))
-                Text("drop today's pic").font(PhFont.bold(24))
+                Text(day == .today ? "drop today's pic" : "drop a pic from \(day.short)").font(PhFont.bold(24))
                 Text("or skip it, words are fine").font(PhFont.mono(14)).foregroundStyle(theme.softInk)
                 HStack(spacing: 10) {
-                    if CameraPicker.isAvailable {
+                    if CameraPicker.isAvailable && day == .today {
                         Button { showCamera = true } label: { TagChip(text: "take one", selected: true) }
                             .buttonStyle(.plain)
                     }
                     PhotosPicker(selection: $pickerItem, matching: .images) {
-                        TagChip(text: "pick one", selected: !CameraPicker.isAvailable)
+                        TagChip(text: "pick one", selected: !(CameraPicker.isAvailable && day == .today))
                     }
                 }
                 .padding(.top, 6)
             }
             .foregroundStyle(theme.ink)
-            .frame(maxWidth: .infinity, minHeight: 250)
+            .frame(maxWidth: .infinity, minHeight: 230)
             .background(RoundedRectangle(cornerRadius: Metrics.radius + 6, style: .continuous).fill(theme.sunken))
             .overlay(RoundedRectangle(cornerRadius: Metrics.radius + 6, style: .continuous)
                 .stroke(theme.ink, lineWidth: Metrics.line))
+        }
+    }
+
+    /// Everything you've posted for the selected day, with real photos.
+    @ViewBuilder
+    private var dayPosts: some View {
+        let posts = store.myPosts.filter { $0.day == day }
+        if !posts.isEmpty {
+            VStack(spacing: 14) {
+                HStack {
+                    Text(day == .today ? "today so far" : "\(day.short) so far").font(PhFont.bold(22))
+                    Spacer()
+                    Text("\(posts.count)").font(PhFont.mono(14)).foregroundStyle(theme.softInk)
+                }
+                InkLine()
+                Masonry(items: posts, weight: { ($0.hasPhoto ? $0.aspect : 0.2) + 0.3 }) { post in
+                    PostCard(post: post)
+                }
+            }
+            .padding(.top, 8)
         }
     }
 
@@ -191,50 +256,18 @@ struct TodayView: View {
     private func post() async {
         isPosting = true
         defer { isPosting = false }
+        captionFocused = false
         let photo = baseImage.flatMap { PhotoProcessor.process(PhotoEditor.render($0, edits)) }
-        let draft = PostDraft(caption: caption.trimmingCharacters(in: .whitespacesAndNewlines),
-                              tags: selectedTags, visibility: visibility == 0 ? .friends : .justMe, photo: photo)
+        let draft = PostDraft(day: day, caption: caption.trimmingCharacters(in: .whitespacesAndNewlines),
+                              tags: selectedTags, visibility: visibilities[visibility], photo: photo)
         do {
             try await store.publish(draft)
             clearPhoto(); caption = ""; selectedTags = []; errorText = nil
+            justPosted = true
+            try? await Task.sleep(for: .seconds(2))
+            justPosted = false
         } catch {
-            errorText = error.localizedDescription
+            errorText = error.localizedDescription.lowercased()
         }
-    }
-}
-
-/// Shown after posting — the post button is gone until tomorrow.
-private struct PostedToday: View {
-    @Environment(AppStore.self) private var store
-    @Environment(\.theme) private var theme
-    let post: Post
-    @State private var confirmDelete = false
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            if post.image != nil || post.tint != nil {
-                PhotoTile(image: post.image, tint: post.tint, aspect: post.aspect)
-            }
-            if !post.caption.isEmpty { Text(post.caption).font(PhFont.body(22)) }
-            if !post.tags.isEmpty {
-                Text(post.tags.map { "#\($0)" }.joined(separator: " ")).font(PhFont.mono(14)).foregroundStyle(theme.softInk)
-            }
-            Text(post.visibility == .friends ? "shared with friends" : "just for you")
-                .font(PhFont.mono(13)).foregroundStyle(theme.softInk)
-
-            VStack(alignment: .leading, spacing: 6) {
-                Text("that's today, done ✓").font(PhFont.bold(24))
-                Text("see you tomorrow ☾").font(PhFont.mono(14)).foregroundStyle(theme.softInk)
-            }
-            .padding(.top, 8)
-
-            Button("delete today's post") { confirmDelete = true }
-                .font(PhFont.mono(13)).foregroundStyle(theme.softInk)
-                .confirmationDialog("delete today's post?", isPresented: $confirmDelete) {
-                    Button("delete", role: .destructive) { Task { await store.deletePost(post) } }
-                }
-        }
-        .foregroundStyle(theme.ink)
-        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }

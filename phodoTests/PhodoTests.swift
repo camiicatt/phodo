@@ -1,5 +1,6 @@
 import CoreLocation
 import ImageIO
+import SwiftUI
 import UIKit
 import UniformTypeIdentifiers
 import XCTest
@@ -67,6 +68,73 @@ final class ThemeTests: XCTestCase {
         XCTAssertEqual(g * 255, 213, accuracy: 3)
         XCTAssertEqual(b * 255, 245, accuracy: 3)
     }
+
+    private func luminance(_ color: Color) -> Double {
+        var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
+        UIColor(color).getRed(&r, green: &g, blue: &b, alpha: &a)
+        func lin(_ c: CGFloat) -> Double { let c = Double(c); return c <= 0.03928 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4) }
+        return 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b)
+    }
+
+    private func contrast(_ a: Color, _ b: Color) -> Double {
+        let (x, y) = (luminance(a), luminance(b))
+        return (max(x, y) + 0.05) / (min(x, y) + 0.05)
+    }
+
+    /// WCAG: body text needs 4.5:1. Every preset, light and dark, must pass.
+    func testEveryThemeIsReadable() {
+        for preset in ThemePreset.all {
+            let t = Theme(preset: preset)
+            XCTAssertGreaterThanOrEqual(contrast(t.ink, t.bg), 7, "\(preset.id): ink on bg")
+            XCTAssertGreaterThanOrEqual(contrast(t.softInk, t.bg), 4.5, "\(preset.id): softInk on bg")
+            XCTAssertGreaterThanOrEqual(contrast(t.softInk, t.card), 4.5, "\(preset.id): softInk on card")
+            XCTAssertGreaterThanOrEqual(contrast(t.bg, t.ink), 7, "\(preset.id): button text")
+        }
+    }
+
+    func testDarkThemesAreSoftNotBlack() {
+        for preset in ThemePreset.darks {
+            let bg = luminance(Theme(preset: preset).bg)
+            XCTAssertGreaterThan(bg, 0.02, "\(preset.id) background is too close to black")
+        }
+    }
+
+    /// Renders real components in every theme into one image (for eyeballing).
+    /// Path is printed in the test log: "theme gallery: …".
+    @MainActor
+    func testRenderThemeGallery() throws {
+        struct Swatch: View {
+            let preset: ThemePreset
+            var body: some View {
+                let t = Theme(preset: preset)
+                VStack(alignment: .leading, spacing: 10) {
+                    ScreenHeader(title: "today", trailing: preset.id)
+                    PhotoTile(image: nil, aspect: 0.7)
+                    Text("iced latte walk").font(PhFont.body(15)).foregroundStyle(t.ink)
+                    Text("nov 16 · #coffee").font(PhFont.mono(11)).foregroundStyle(t.softInk)
+                    HStack { TagChip(text: "#coffee", selected: true); TagChip(text: "#nap") }
+                    Button("post it") {}.buttonStyle(PrimaryButtonStyle())
+                }
+                .padding(14).frame(width: 230)
+                .background(t.bg)
+                .environment(\.theme, t)
+            }
+        }
+        let gallery = VStack(spacing: 0) {
+            HStack(spacing: 0) { ForEach(ThemePreset.light) { Swatch(preset: $0) } }
+            HStack(spacing: 0) { ForEach(ThemePreset.darks) { Swatch(preset: $0) } }
+        }
+        let renderer = ImageRenderer(content: gallery)
+        renderer.scale = 2
+        let data = try XCTUnwrap(renderer.uiImage?.pngData())
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("phodo-theme-gallery.png")
+        try data.write(to: url)
+        print("theme gallery: \(url.path)")
+    }
+
+    func testPresetIDsAreUnique() {
+        XCTAssertEqual(Set(ThemePreset.all.map(\.id)).count, ThemePreset.all.count)
+    }
 }
 
 final class AccountRulesTests: XCTestCase {
@@ -104,30 +172,96 @@ final class AccountRulesTests: XCTestCase {
 
 @MainActor
 final class PostingTests: XCTestCase {
-    func testOnlyOnePostPerDay() async throws {
-        let me = SampleData.me
-        let service = MockPostService(me: me, seed: false)
-        let draft = PostDraft(caption: "hi", tags: [], visibility: .friends, photo: nil)
+    private let me = SampleData.me
 
-        _ = try await service.createPost(draft, by: me, on: .today)
+    private func draft(_ caption: String = "hi", day: LocalDay = .today, _ vis: PostVisibility = .friends) -> PostDraft {
+        PostDraft(day: day, caption: caption, tags: [], visibility: vis, photo: nil)
+    }
+
+    func testSeveralPostsPerDayAllowed() async throws {
+        let service = MockPostService(me: me, seed: false)
+        _ = try await service.createPost(draft("one"), by: me)
+        _ = try await service.createPost(draft("two"), by: me)
+        let mine = try await service.myPosts(me)
+        XCTAssertEqual(mine.filter { $0.day == .today }.count, 2)
+    }
+
+    func testCanFillInAMissedDay() async throws {
+        let service = MockPostService(me: me, seed: false)
+        let lastWeek = LocalDay.today.adding(days: -7)
+        let post = try await service.createPost(draft(day: lastWeek), by: me)
+        XCTAssertEqual(post.day, lastWeek)
+    }
+
+    func testCannotPostForTheFuture() async {
+        let service = MockPostService(me: me, seed: false)
         do {
-            _ = try await service.createPost(draft, by: me, on: .today)
-            XCTFail("second post should fail")
+            _ = try await service.createPost(draft(day: LocalDay.today.adding(days: 1)), by: me)
+            XCTFail("future post should fail")
         } catch {
-            XCTAssertEqual(error as? PostError, .alreadyPostedToday)
+            XCTAssertEqual(error as? PostError, .futureDay)
         }
-        // tomorrow is fine
-        _ = try await service.createPost(draft, by: me, on: LocalDay.today.adding(days: 1))
     }
 
     func testEmptyPostRejected() async {
-        let service = MockPostService(me: SampleData.me, seed: false)
+        let service = MockPostService(me: me, seed: false)
         do {
-            _ = try await service.createPost(PostDraft(caption: "  ", tags: [], visibility: .friends, photo: nil),
-                                             by: SampleData.me, on: .today)
+            _ = try await service.createPost(draft("  "), by: me)
             XCTFail("empty post should fail")
         } catch {
             XCTAssertEqual(error as? PostError, .empty)
         }
+    }
+
+    func testFeedOnlyShowsChosenPeopleAndHidesPrivate() async throws {
+        let service = MockPostService(me: me, seed: false)
+        let friend = SampleData.friends[0], stranger = SampleData.strangers[0]
+        _ = try await service.createPost(draft("for friends"), by: friend)
+        _ = try await service.createPost(draft("secret", .justMe), by: friend)
+        _ = try await service.createPost(draft("hi world", .everyone), by: stranger)
+
+        let feed = try await service.feed(from: [friend.id], since: Date().addingTimeInterval(-3600))
+        XCTAssertEqual(feed.map(\.caption), ["for friends"])
+
+        let explore = try await service.explore()
+        XCTAssertEqual(explore.map(\.caption), ["hi world"])
+    }
+}
+
+@MainActor
+final class FriendTests: XCTestCase {
+    func testRequestAcceptRemove() async throws {
+        let social = MockSocialService(seed: false)
+        let june = SampleData.strangers[0]
+        try await social.request(june.id)
+        var conns = try await social.connections()
+        XCTAssertEqual(conns.first?.status, .outgoing)
+        try await social.accept(june.id)
+        conns = try await social.connections()
+        XCTAssertEqual(conns.first?.status, .friends)
+        try await social.remove(june.id)
+        conns = try await social.connections()
+        XCTAssertTrue(conns.isEmpty)
+    }
+
+    func testSearchByUsernamePrefix() async throws {
+        let social = MockSocialService(seed: false)
+        let found = try await social.search("Ju")
+        XCTAssertEqual(found.map(\.username), ["june"])
+        let none = try await social.search("")
+        XCTAssertTrue(none.isEmpty)
+    }
+
+    func testBoardsSaveAndUnsave() async throws {
+        let social = MockSocialService(seed: false)
+        let board = try await social.createBoard(named: "cozy")
+        let post = UUID()
+        try await social.save(post, to: board.id)
+        try await social.save(post, to: board.id)           // saving twice doesn't duplicate
+        var boards = try await social.boards()
+        XCTAssertEqual(boards.first?.postIDs, [post])
+        try await social.unsave(post, from: board.id)
+        boards = try await social.boards()
+        XCTAssertEqual(boards.first?.postIDs, [])
     }
 }

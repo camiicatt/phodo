@@ -55,11 +55,36 @@ struct Person: Identifiable, Hashable {
     var bio: String = ""
     var location: String = ""
     var theme: String = ThemePreset.lavender.id
+    /// Storage path in the "avatars" bucket, and a temporary link to it.
+    var avatarPath: String? = nil
+    var avatarURL: URL? = nil
 }
 
 enum PostVisibility: String, CaseIterable {
     case friends
+    case everyone = "public"
     case justMe = "private"
+
+    var label: String {
+        switch self {
+        case .friends: "friends"
+        case .everyone: "everyone"
+        case .justMe: "just me"
+        }
+    }
+}
+
+/// How I'm connected to someone.
+enum FriendStatus: Equatable {
+    case friends
+    case incoming   // they asked me
+    case outgoing   // I asked them
+}
+
+struct Connection: Identifiable {
+    var person: Person
+    var status: FriendStatus
+    var id: UUID { person.id }
 }
 
 struct Post: Identifiable {
@@ -75,8 +100,11 @@ struct Post: Identifiable {
     var aspect: CGFloat
     /// Average color of the photo — used as the placeholder while it loads.
     var tint: Color?
-    /// Temporary signed link to the thumbnail (real backend only).
+    /// Temporary signed links (real backend only).
     var thumbURL: URL? = nil
+    var fullURL: URL? = nil
+    /// When it was posted (a missed day can be posted later).
+    var createdAt: Date = Date()
     /// Storage paths, so deleting the post can delete the files.
     var paths: [String] = []
     /// false for words-only posts.
@@ -91,6 +119,8 @@ struct Board: Identifiable {
 
 /// What the "today" screen hands to the backend.
 struct PostDraft {
+    /// Which day it's for: today, or a day you missed.
+    var day: LocalDay = .today
     var caption: String
     var tags: [String]
     var visibility: PostVisibility

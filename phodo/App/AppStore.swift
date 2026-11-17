@@ -2,8 +2,8 @@ import SwiftUI
 import UserNotifications
 
 /// App-wide state. Screens read from here and call its methods; it talks to the
-/// backend through `AccountService` + `PostService` (Supabase if configured,
-/// otherwise in-memory mocks).
+/// backend through `AccountService`, `PostService` and `SocialService`
+/// (Supabase if configured, otherwise in-memory mocks).
 @MainActor
 @Observable
 final class AppStore {
@@ -17,9 +17,11 @@ final class AppStore {
     var phase: Phase = .loading
     var me: Person
     var myPosts: [Post] = []
-    var feed: [Post] = []
+    var feed: [Post] = []          // friends, last 24h
+    var explore: [Post] = []       // "everyone" posts
+    var connections: [Connection] = []
     var boards: [Board] = []
-    var recentTags: [String] = SampleData.recentTags
+    private var boardPosts: [UUID: Post] = [:]   // saved posts not already loaded elsewhere
     var loadError: String?
 
     private(set) var themeID: String
@@ -28,6 +30,7 @@ final class AppStore {
     let isLive: Bool
     private let account: AccountService
     private let service: PostService
+    private let social: SocialService
     private let defaults: UserDefaults
 
     init(defaults: UserDefaults = .standard) {
@@ -37,18 +40,30 @@ final class AppStore {
             isLive = true
             account = SupabaseAccountService(client: client)
             service = SupabasePostService(client: client)
+            social = SupabaseSocialService(client: client)
         } else {
             isLive = false
             account = MockAccountService()
             service = MockPostService(me: SampleData.me)
+            social = MockSocialService()
         }
         themeID = defaults.string(forKey: "themeID") ?? ThemePreset.lavender.id
         reminderTime = defaults.object(forKey: "reminderTime") as? Date
     }
 
     var theme: ThemePreset { ThemePreset.find(themeID) }
-    var todaysPost: Post? { myPosts.first { $0.day == .today } }
+    var todaysPosts: [Post] { myPosts.filter { $0.day == .today } }
     var daysPosted: Int { Set(myPosts.map(\.day)).count }
+    var friends: [Connection] { connections.filter { $0.status == .friends } }
+    var incoming: [Connection] { connections.filter { $0.status == .incoming } }
+
+    /// Your own tags (most recent first), topped up with everyday starters.
+    var recentTags: [String] {
+        var seen = Set<String>()
+        return (myPosts.flatMap(\.tags) + SampleData.starterTags).filter { seen.insert($0).inserted }
+    }
+
+    func status(of id: UUID) -> FriendStatus? { connections.first { $0.id == id }?.status }
 
     // MARK: session
 
@@ -126,6 +141,11 @@ final class AppStore {
         try? await account.updateProfile(me)
     }
 
+    /// `jpeg` should already be square and small (see ProfileView).
+    func setAvatar(_ jpeg: Data) async throws {
+        me = try await account.setAvatar(jpeg, for: me)
+    }
+
     func signOut() async {
         try? await account.signOut()
         reset()
@@ -137,34 +157,47 @@ final class AppStore {
     }
 
     private func reset() {
-        myPosts = []; feed = []; boards = []
+        myPosts = []; feed = []; explore = []; connections = []; boards = []; boardPosts = [:]
         me = SampleData.me
         phase = .signedOut
     }
 
-    // MARK: posts
+    // MARK: loading
 
     func load() async {
         do {
-            myPosts = try await service.myPosts(me)
-            feed = try await service.friendsFeed(on: .today)
+            async let mine = service.myPosts(me)
+            async let conns = social.connections()
+            async let bs = social.boards()
+            myPosts = try await mine
+            connections = try await conns
+            boards = try await bs
+            try await refreshFeeds()
+            await loadBoardPosts()
             loadError = nil
         } catch {
             loadError = error.localizedDescription
         }
-        if boards.isEmpty {
-            // Boards are still local-only (not in Supabase yet).
-            let saved = isLive ? [] : Array(feed.prefix(3).map(\.id)) + Array(myPosts.prefix(3).map(\.id))
-            boards = [Board(id: UUID(), name: "fall", postIDs: saved),
-                      Board(id: UUID(), name: "food", postIDs: []),
-                      Board(id: UUID(), name: "sunsets", postIDs: [])]
-        }
     }
 
+    func refreshFeeds() async throws {
+        feed = try await service.feed(from: friends.map(\.id), since: Date().addingTimeInterval(-24 * 3600))
+        explore = try await service.explore()
+    }
+
+    private func loadBoardPosts() async {
+        let known = Set((myPosts + feed + explore).map(\.id)).union(boardPosts.keys)
+        let missing = Array(Set(boards.flatMap(\.postIDs)).subtracting(known))
+        guard !missing.isEmpty, let found = try? await service.posts(ids: missing) else { return }
+        for p in found { boardPosts[p.id] = p }
+    }
+
+    // MARK: posts
+
     func publish(_ draft: PostDraft) async throws {
-        let post = try await service.createPost(draft, by: me, on: .today)
-        myPosts.insert(post, at: 0)
-        for tag in draft.tags where !recentTags.contains(tag) { recentTags.insert(tag, at: 0) }
+        let post = try await service.createPost(draft, by: me)
+        myPosts.append(post)
+        myPosts.sort { ($0.day, $0.createdAt) > ($1.day, $1.createdAt) }
     }
 
     func deletePost(_ post: Post) async {
@@ -173,30 +206,85 @@ final class AppStore {
         for i in boards.indices { boards[i].postIDs.removeAll { $0 == post.id } }
     }
 
-    // MARK: boards
-
     func post(_ id: UUID) -> Post? {
         myPosts.first { $0.id == id } ?? feed.first { $0.id == id }
+            ?? explore.first { $0.id == id } ?? boardPosts[id]
     }
 
-    func toggle(_ postID: UUID, in boardID: UUID) {
-        guard let i = boards.firstIndex(where: { $0.id == boardID }) else { return }
-        if let j = boards[i].postIDs.firstIndex(of: postID) {
-            boards[i].postIDs.remove(at: j)
-        } else {
-            boards[i].postIDs.insert(postID, at: 0)
-        }
+    // MARK: friends
+
+    func search(_ query: String) async -> [Person] {
+        (try? await social.search(query)) ?? []
     }
+
+    /// "add": accepts instead if they already asked you.
+    func addFriend(_ person: Person) async {
+        if status(of: person.id) == .incoming {
+            await accept(person.id)
+            return
+        }
+        try? await social.request(person.id)
+        if status(of: person.id) == nil { connections.append(Connection(person: person, status: .outgoing)) }
+    }
+
+    func accept(_ id: UUID) async {
+        try? await social.accept(id)
+        if let i = connections.firstIndex(where: { $0.id == id }) { connections[i].status = .friends }
+        try? await refreshFeeds()
+    }
+
+    func removeConnection(_ id: UUID) async {
+        try? await social.remove(id)
+        connections.removeAll { $0.id == id }
+        feed.removeAll { $0.author.id == id }
+    }
+
+    // MARK: safety
+
+    func report(_ post: Post, reason: String) async {
+        try? await social.report(post: post.id, user: post.author.id, reason: reason)
+    }
+
+    func block(_ person: Person) async {
+        try? await social.block(person.id)
+        connections.removeAll { $0.id == person.id }
+        feed.removeAll { $0.author.id == person.id }
+        explore.removeAll { $0.author.id == person.id }
+    }
+
+    // MARK: boards
 
     func isSaved(_ postID: UUID) -> Bool { boards.contains { $0.postIDs.contains(postID) } }
 
+    func toggle(_ postID: UUID, in boardID: UUID) async {
+        guard let i = boards.firstIndex(where: { $0.id == boardID }) else { return }
+        if let j = boards[i].postIDs.firstIndex(of: postID) {
+            boards[i].postIDs.remove(at: j)
+            try? await social.unsave(postID, from: boardID)
+        } else {
+            boards[i].postIDs.insert(postID, at: 0)
+            try? await social.save(postID, to: boardID)
+        }
+    }
+
     @discardableResult
-    func createBoard(named name: String) -> Board? {
+    func createBoard(named name: String) async -> Board? {
         let clean = name.lowercased().trimmingCharacters(in: .whitespaces).replacingOccurrences(of: "#", with: "")
-        guard !clean.isEmpty else { return nil }
-        let board = Board(id: UUID(), name: clean, postIDs: [])
+        guard !clean.isEmpty, let board = try? await social.createBoard(named: clean) else { return nil }
         boards.append(board)
         return board
+    }
+
+    func renameBoard(_ id: UUID, to name: String) async {
+        let clean = name.lowercased().trimmingCharacters(in: .whitespaces)
+        guard !clean.isEmpty, let i = boards.firstIndex(where: { $0.id == id }) else { return }
+        boards[i].name = clean
+        try? await social.renameBoard(id, to: clean)
+    }
+
+    func deleteBoard(_ id: UUID) async {
+        boards.removeAll { $0.id == id }
+        try? await social.deleteBoard(id)
     }
 
     // MARK: preferences

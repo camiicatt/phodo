@@ -9,3 +9,4 @@ phodo.xcodeproj/
 Secrets.xcconfig
 supabase/.env
 node_modules/
+.claude

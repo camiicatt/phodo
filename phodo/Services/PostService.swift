@@ -1,63 +1,77 @@
 import SwiftUI
 
 enum PostError: LocalizedError, Equatable {
-    case alreadyPostedToday
     case empty
+    case futureDay
 
     var errorDescription: String? {
         switch self {
-        case .alreadyPostedToday: "you already posted today — see you tomorrow ☾"
         case .empty: "add a pic or a few words first"
+        case .futureDay: "you can't post for a day that hasn't happened yet"
         }
     }
 }
 
-/// The app talks to the backend only through this protocol.
-/// `MockPostService` runs everything in memory today; a `SupabasePostService`
-/// (see docs/ARCHITECTURE.md) slots in later without touching any screen.
+/// The app talks to the backend only through these protocols.
+/// Mock versions run everything in memory (demo mode); Supabase versions are real.
 @MainActor
 protocol PostService {
     func myPosts(_ me: Person) async throws -> [Post]
-    func friendsFeed(on day: LocalDay) async throws -> [Post]
-    /// Upload photo (if any) → insert post row. Throws `.alreadyPostedToday`.
-    func createPost(_ draft: PostDraft, by me: Person, on day: LocalDay) async throws -> Post
+    /// Posts from these people created in the last day (includes missed-day posts).
+    func feed(from authors: [UUID], since: Date) async throws -> [Post]
+    /// Recent "everyone" posts from people who aren't me.
+    func explore() async throws -> [Post]
+    func posts(ids: [UUID]) async throws -> [Post]
+    func createPost(_ draft: PostDraft, by me: Person) async throws -> Post
     func deletePost(_ id: UUID) async throws
+}
+
+extension PostDraft {
+    /// Shared rules for every backend.
+    func validate() throws {
+        guard !isEmpty else { throw PostError.empty }
+        guard day <= LocalDay.today else { throw PostError.futureDay }
+    }
 }
 
 @MainActor
 final class MockPostService: PostService {
-    private var mine: [Post] = []
-    private var friends: [Post]
+    private var all: [Post]
 
     init(me: Person, seed: Bool = true) {
-        friends = seed ? SampleData.friendPosts() : []
-        mine = seed ? SampleData.myPosts(me) : []
+        all = seed ? SampleData.friendPosts() + SampleData.myPosts(me) + SampleData.explorePosts() : []
     }
 
-    func myPosts(_ me: Person) async throws -> [Post] { mine.sorted { $0.day > $1.day } }
-
-    func friendsFeed(on day: LocalDay) async throws -> [Post] {
-        friends.filter { $0.day == day && $0.visibility == .friends }
+    func myPosts(_ me: Person) async throws -> [Post] {
+        all.filter { $0.author.id == me.id }.sorted { ($0.day, $0.createdAt) > ($1.day, $1.createdAt) }
     }
 
-    func createPost(_ draft: PostDraft, by me: Person, on day: LocalDay) async throws -> Post {
-        guard !draft.isEmpty else { throw PostError.empty }
-        // In Supabase this is the UNIQUE(user_id, local_date) constraint.
-        guard !mine.contains(where: { $0.day == day }) else { throw PostError.alreadyPostedToday }
+    func feed(from authors: [UUID], since: Date) async throws -> [Post] {
+        let ids = Set(authors)
+        return all.filter { ids.contains($0.author.id) && $0.visibility != .justMe && $0.createdAt >= since }
+    }
 
-        try await Task.sleep(for: .milliseconds(600))   // pretend upload
+    func explore() async throws -> [Post] {
+        all.filter { $0.visibility == .everyone && !SampleData.friends.map(\.id).contains($0.author.id) }
+    }
 
-        let post = Post(id: UUID(), author: me, day: day,
+    func posts(ids: [UUID]) async throws -> [Post] {
+        all.filter { ids.contains($0.id) }
+    }
+
+    func createPost(_ draft: PostDraft, by me: Person) async throws -> Post {
+        try draft.validate()
+        try await Task.sleep(for: .milliseconds(500))   // pretend upload
+        var post = Post(id: UUID(), author: me, day: draft.day,
                         caption: draft.caption, tags: draft.tags, visibility: draft.visibility,
                         image: draft.photo?.preview, aspect: draft.photo?.aspect ?? 0.6,
                         tint: draft.photo.map { Color(uiColor: $0.tint) })
-        var saved = post
-        saved.hasPhoto = draft.photo != nil
-        mine.append(saved)
-        return saved
+        post.hasPhoto = draft.photo != nil
+        all.append(post)
+        return post
     }
 
     func deletePost(_ id: UUID) async throws {
-        mine.removeAll { $0.id == id }
+        all.removeAll { $0.id == id }
     }
 }

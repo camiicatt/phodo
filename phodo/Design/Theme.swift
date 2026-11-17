@@ -1,15 +1,19 @@
 import SwiftUI
 
-/// A color the user can pick. Every preset is a single hue; the whole palette
-/// (background, cards, photo tint, ink…) is derived from it with fixed
-/// saturation/brightness steps, so every theme keeps the same contrast.
+/// A color the user can pick. Every preset is a single hue plus light or dark;
+/// the whole palette (background, cards, photo tint, ink…) is derived from it
+/// with fixed saturation/brightness steps, so every theme keeps the same contrast.
+///
+/// Light vs dark is part of the user's choice. phodo does NOT follow the
+/// phone's dark-mode setting.
 struct ThemePreset: Identifiable, Hashable {
     let id: String
     let hue: Double   // 0...1
+    var dark = false
 
     var name: String { id }
 
-    static let all: [ThemePreset] = [
+    static let light: [ThemePreset] = [
         .init(id: "lavender", hue: 252 / 360),   // the default, matches the mockups
         .init(id: "sage",     hue: 110 / 360),
         .init(id: "peach",    hue: 22 / 360),
@@ -18,7 +22,17 @@ struct ThemePreset: Identifiable, Hashable {
         .init(id: "rose",     hue: 340 / 360),
     ]
 
-    static let lavender = all[0]
+    static let darks: [ThemePreset] = [
+        .init(id: "dusk",  hue: 252 / 360, dark: true),   // lavender, after sunset
+        .init(id: "plum",  hue: 300 / 360, dark: true),
+        .init(id: "moss",  hue: 120 / 360, dark: true),
+        .init(id: "ocean", hue: 210 / 360, dark: true),
+        .init(id: "cocoa", hue: 22 / 360,  dark: true),
+        .init(id: "wine",  hue: 345 / 360, dark: true),
+    ]
+
+    static let all = light + darks
+    static let lavender = light[0]
 
     static func find(_ id: String) -> ThemePreset {
         all.first { $0.id == id } ?? .lavender
@@ -49,10 +63,10 @@ struct Theme {
     let softInk: Color
     let ink: Color
 
-    init(preset: ThemePreset, isDark: Bool = false) {
+    init(preset: ThemePreset) {
         self.preset = preset
-        self.isDark = isDark
-        let s = Theme.steps(isDark: isDark)
+        self.isDark = preset.dark
+        let s = Theme.steps(isDark: preset.dark)
         func c(_ step: (Double, Double)) -> Color {
             Color(hue: preset.hue, saturation: step.0, brightness: step.1)
         }
@@ -61,13 +75,14 @@ struct Theme {
     }
 
     /// (saturation, brightness) for each token. Light values were measured from the
-    /// lavender mockup hexes; dark values invert the ramp.
+    /// lavender mockup hexes. Dark values are a soft "dusk", not near-black: the
+    /// background sits around 26% brightness, with raised cards lighter than it.
     static func steps(isDark: Bool) -> (card: (Double, Double), chip: (Double, Double), bg: (Double, Double),
                                         sunken: (Double, Double), photoTint: (Double, Double), accent: (Double, Double),
                                         softInk: (Double, Double), ink: (Double, Double)) {
         if isDark {
-            return (card: (0.28, 0.17), chip: (0.26, 0.21), bg: (0.30, 0.12), sunken: (0.32, 0.09),
-                    photoTint: (0.30, 0.26), accent: (0.35, 0.85), softInk: (0.12, 0.72), ink: (0.06, 0.95))
+            return (card: (0.30, 0.33), chip: (0.30, 0.31), bg: (0.34, 0.26), sunken: (0.36, 0.21),
+                    photoTint: (0.30, 0.40), accent: (0.30, 0.82), softInk: (0.14, 0.80), ink: (0.05, 0.97))
         }
         return (card: (0.05, 0.99), chip: (0.09, 0.98), bg: (0.13, 0.96), sunken: (0.175, 0.94),
                 photoTint: (0.21, 0.92), accent: (0.35, 0.77), softInk: (0.28, 0.38), ink: (0.33, 0.15))

@@ -1,19 +1,30 @@
+import PhotosUI
 import SwiftUI
 
-/// Screen 3 — your profile, with a pics / journal toggle.
+/// A day you can open from the journal or the pics grid.
+struct OpenDay: Identifiable, Hashable {
+    let day: LocalDay
+    var id: String { day.key }
+}
+
+/// Tab 3: your profile, with a pics / journal toggle.
 struct ProfileView: View {
     @Environment(AppStore.self) private var store
     @Environment(\.theme) private var theme
     @State private var mode = 0              // 0 pics, 1 journal
     @State private var showEdit = false
     @State private var showSettings = false
-    @State private var openDay: Post?
+    @State private var openDay: OpenDay?
+    @State private var avatarItem: PhotosPickerItem?
+    @State private var uploadingAvatar = false
+    @State private var avatarError: String?
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
                 header
                 if !store.me.bio.isEmpty { Text(store.me.bio).font(PhFont.body(19)) }
+                if let avatarError { Text(avatarError).font(PhFont.mono(13)) }
 
                 HStack(spacing: 12) {
                     Button("edit profile") { showEdit = true }.buttonStyle(OutlineButtonStyle())
@@ -21,39 +32,46 @@ struct ProfileView: View {
                 }
                 InkLine()
 
-                if mode == 0 {
-                    Masonry(items: store.myPosts, weight: { $0.aspect + 0.3 }) { post in
-                        PostCard(post: post, showDate: true).onTapGesture { openDay = post }
+                if store.myPosts.isEmpty {
+                    Text("your posts will live here. go make today's ☾")
+                        .font(PhFont.mono(14)).foregroundStyle(theme.softInk)
+                } else if mode == 0 {
+                    Masonry(items: store.myPosts, weight: { ($0.hasPhoto ? $0.aspect : 0.2) + 0.3 }) { post in
+                        PostCard(post: post, showDate: true)
+                            .onTapGesture { openDay = OpenDay(day: post.day) }
                     }
                 } else {
-                    JournalCalendar(posts: store.myPosts) { openDay = $0 }
+                    JournalCalendar(posts: store.myPosts) { openDay = OpenDay(day: $0) }
                 }
             }
             .foregroundStyle(theme.ink)
             .padding(.top, 12).padding(.bottom, 24)
         }
+        .refreshable { await store.load() }
         .phodoPage()
+        .onChange(of: avatarItem) { _, item in Task { await setAvatar(item) } }
         .sheet(isPresented: $showEdit) { EditProfileSheet().environment(\.theme, theme) }
         .sheet(isPresented: $showSettings) { SettingsSheet().environment(\.theme, theme) }
-        .sheet(item: $openDay) { post in
-            ScrollView {
-                VStack(alignment: .leading, spacing: 14) {
-                    ScreenHeader(title: post.day.short)
-                    PostCard(post: post)
-                }
-                .padding(.top, 24)
-            }
-            .phodoPage()
-            .environment(\.theme, theme)
-            .presentationDetents([.large])
+        .sheet(item: $openDay) { open in
+            DaySheet(day: open.day).environment(\.theme, theme).presentationDetents([.large])
         }
     }
 
     private var header: some View {
         HStack(alignment: .center, spacing: 16) {
-            Circle().fill(theme.photoTint).frame(width: 76, height: 76)
-                .overlay(Circle().stroke(theme.ink, lineWidth: Metrics.line))
-                .overlay(Text(String(store.me.username.prefix(1))).font(PhFont.title(34)))
+            PhotosPicker(selection: $avatarItem, matching: .images) {
+                Avatar(person: store.me, size: 76)
+                    .overlay(alignment: .bottomTrailing) {
+                        Image(systemName: uploadingAvatar ? "hourglass" : "camera.fill")
+                            .font(.system(size: 11)).foregroundStyle(theme.bg)
+                            .frame(width: 24, height: 24)
+                            .background(Circle().fill(theme.ink))
+                    }
+            }
+            .buttonStyle(.plain)
+            .disabled(uploadingAvatar)
+            .accessibilityLabel("change profile picture")
+
             VStack(alignment: .leading, spacing: 2) {
                 Text("@\(store.me.username)").font(PhFont.title(30)).lineLimit(1).minimumScaleFactor(0.6)
                 Text(store.me.displayName).font(PhFont.body(18))
@@ -70,13 +88,50 @@ struct ProfileView: View {
             .accessibilityLabel("settings")
         }
     }
+
+    /// Picked photo → center square → 512px JPEG (no metadata) → upload.
+    private func setAvatar(_ item: PhotosPickerItem?) async {
+        guard let item, let data = try? await item.loadTransferable(type: Data.self),
+              let base = PhotoProcessor.downsample(data, maxPixel: 1024) else { return }
+        var square = EditSettings()
+        square.aspect = .square
+        let cropped = PhotoProcessor.resize(PhotoEditor.render(base, square), maxPixel: 512)
+        guard let jpeg = PhotoProcessor.encodeJPEG(cropped, quality: 0.85) else { return }
+        uploadingAvatar = true
+        defer { uploadingAvatar = false; avatarItem = nil }
+        do {
+            try await store.setAvatar(jpeg)
+            avatarError = nil
+        } catch {
+            avatarError = "couldn't save that pic, try again"
+        }
+    }
+}
+
+/// Everything you posted for one day.
+struct DaySheet: View {
+    @Environment(AppStore.self) private var store
+    let day: LocalDay
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                ScreenHeader(title: day.short, trailing: day.header)
+                ForEach(store.myPosts.filter { $0.day == day }) { post in
+                    PostCard(post: post, large: true)
+                }
+            }
+            .padding(.top, 24).padding(.bottom, 24)
+        }
+        .phodoPage()
+    }
 }
 
 /// Month grid: posted days are filled, today has an accent ring.
 struct JournalCalendar: View {
     @Environment(\.theme) private var theme
     let posts: [Post]
-    let onOpen: (Post) -> Void
+    let onOpen: (LocalDay) -> Void
     @State private var monthOffset = 0
 
     var body: some View {
@@ -109,7 +164,7 @@ struct JournalCalendar: View {
                 ForEach(1...days, id: \.self) { d in
                     let day = LocalDay(cal.date(byAdding: .day, value: d - 1, to: first)!)
                     let post = byDay[day]
-                    Button { if let post { onOpen(post) } } label: {
+                    Button { if post != nil { onOpen(day) } } label: {
                         Text("\(d)").font(PhFont.mono(14))
                             .foregroundStyle(post != nil ? theme.bg : theme.ink)
                             .frame(maxWidth: .infinity, minHeight: 44)
@@ -168,6 +223,7 @@ struct SettingsSheet: View {
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
+        ScrollView {
         VStack(alignment: .leading, spacing: 22) {
             Text("settings").font(PhFont.title(34))
             FieldLabel("your color")
@@ -180,10 +236,15 @@ struct SettingsSheet: View {
             Button("delete my account") { confirmDelete = true }
                 .font(PhFont.mono(15)).foregroundStyle(theme.softInk)
             if let deleteError { Text(deleteError).font(PhFont.mono(13)) }
-            Spacer()
+            HStack(spacing: 16) {
+                Link("privacy", destination: URL(string: "https://phodo.app/privacy")!)
+                Link("help: hi@phodo.app", destination: URL(string: "mailto:hi@phodo.app")!)
+            }
+            .font(PhFont.mono(13)).foregroundStyle(theme.softInk)
         }
         .foregroundStyle(theme.ink)
-        .padding(.top, 28)
+        .padding(.top, 28).padding(.bottom, 24)
+        }
         .phodoPage()
         .confirmationDialog("delete your account?", isPresented: $confirmDelete, titleVisibility: .visible) {
             Button("delete everything", role: .destructive) {

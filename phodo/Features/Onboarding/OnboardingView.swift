@@ -151,12 +151,20 @@ struct OnboardingView: View {
 /// Swatches; tapping one recolors the whole app live.
 struct ColorPresetPicker: View {
     @Environment(AppStore.self) private var store
-    @Environment(\.colorScheme) private var scheme
 
     var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            FieldLabel("light")
+            grid(ThemePreset.light)
+            FieldLabel("dark")
+            grid(ThemePreset.darks)
+        }
+    }
+
+    private func grid(_ presets: [ThemePreset]) -> some View {
         LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 12), count: 3), spacing: 12) {
-            ForEach(ThemePreset.all) { preset in
-                let t = Theme(preset: preset, isDark: scheme == .dark)
+            ForEach(presets) { preset in
+                let t = Theme(preset: preset)
                 let selected = preset.id == store.themeID
                 Button { store.setTheme(preset) } label: {
                     VStack(spacing: 6) {
