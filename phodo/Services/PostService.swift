@@ -22,6 +22,8 @@ protocol PostService {
     /// Recent "everyone" posts from people who aren't me.
     func explore() async throws -> [Post]
     func posts(ids: [UUID]) async throws -> [Post]
+    /// Someone's posts that I'm allowed to see.
+    func posts(by userID: UUID) async throws -> [Post]
     func createPost(_ draft: PostDraft, by me: Person) async throws -> Post
     func deletePost(_ id: UUID) async throws
 }
@@ -57,6 +59,11 @@ final class MockPostService: PostService {
 
     func posts(ids: [UUID]) async throws -> [Post] {
         all.filter { ids.contains($0.id) }
+    }
+
+    func posts(by userID: UUID) async throws -> [Post] {
+        all.filter { $0.author.id == userID && $0.visibility != .justMe }
+            .sorted { ($0.day, $0.createdAt) > ($1.day, $1.createdAt) }
     }
 
     func createPost(_ draft: PostDraft, by me: Person) async throws -> Post {

@@ -46,7 +46,10 @@ final class SupabasePostService: PostService {
         let visibility: String
     }
 
-    private static let select = "*, author:profiles(id, username, display_name, avatar_path)"
+    /// Name the exact link (posts.user_id → profiles). Posts and profiles are also
+    /// connected through reactions, comments and reports, so a bare `profiles(...)`
+    /// is ambiguous and Supabase answers "300 multiple choices".
+    private static let select = "*, author:profiles!posts_user_id_fkey(id, username, display_name, avatar_path)"
     private var myID: UUID? { client.auth.currentUser?.id }
 
     // MARK: reads
@@ -84,6 +87,15 @@ final class SupabasePostService: PostService {
         guard !ids.isEmpty else { return [] }
         let rows: [PostRow] = try await client.from("posts").select(Self.select)
             .in("id", values: ids.map(\.lower)).execute().value
+        return try await posts(from: rows)
+    }
+
+    func posts(by userID: UUID) async throws -> [Post] {
+        let rows: [PostRow] = try await client.from("posts").select(Self.select)
+            .eq("user_id", value: userID.lower)
+            .order("local_date", ascending: false).order("created_at", ascending: false)
+            .limit(200)
+            .execute().value
         return try await posts(from: rows)
     }
 

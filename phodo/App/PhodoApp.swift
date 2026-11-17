@@ -40,10 +40,11 @@ struct ThemedRoot: View {
 }
 
 enum Tab: String, CaseIterable {
-    case friends, today, profile, boards
+    case explore, today, profile, boards   // explore holds the friends / everyone toggle
 }
 
 struct RootTabView: View {
+    @Environment(AppStore.self) private var store
     @Environment(\.theme) private var theme
     @State private var tab: Tab = .today
 
@@ -51,13 +52,19 @@ struct RootTabView: View {
         VStack(spacing: 0) {
             Group {
                 switch tab {
-                case .friends: FriendsFeedView()
+                case .explore: FriendsFeedView()
                 case .today: TodayView()
                 case .profile: ProfileView()
                 case .boards: BoardsView()
                 }
             }
             .frame(maxHeight: .infinity)
+            if let problem = store.loadError {
+                Text(problem).font(PhFont.mono(12)).foregroundStyle(theme.bg)
+                    .padding(.horizontal, 14).padding(.vertical, 8)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(theme.ink)
+            }
             TextTabBar(selection: $tab)
         }
         .ignoresSafeArea(.keyboard, edges: .bottom)   // keyboard covers the tab bar instead of pushing it up

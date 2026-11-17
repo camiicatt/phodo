@@ -115,6 +115,15 @@ struct Board: Identifiable {
     let id: UUID
     var name: String
     var postIDs: [UUID]
+    /// Public boards show on your profile for anyone to see.
+    var isPublic: Bool = false
+}
+
+/// Totals shown on a profile. Counts only, never who.
+struct ProfileStats: Equatable {
+    var likes = 0     // ♥ on your posts from other people
+    var saves = 0     // times other people saved your posts to their boards
+    var friends = 0
 }
 
 /// What the "today" screen hands to the backend.

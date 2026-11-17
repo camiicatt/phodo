@@ -29,7 +29,7 @@ struct FriendsFeedView: View {
             .foregroundStyle(theme.ink)
             .padding(.top, 12).padding(.bottom, 24)
         }
-        .refreshable { await store.load() }
+        .refreshable { await Task { await store.load() }.value }   // own task: SwiftUI cancels refresh tasks when the screen updates mid-refresh
         .phodoPage()
         .sheet(isPresented: $showFriends) {
             FriendFinder().environment(\.theme, theme).presentationDetents([.large])
@@ -93,6 +93,7 @@ struct FriendFinder: View {
     @State private var query = ""
     @State private var results: [Person] = []
     @State private var searching = false
+    @State private var viewing: Person?
 
     var body: some View {
         ScrollView {
@@ -151,17 +152,23 @@ struct FriendFinder: View {
         }
         .scrollDismissesKeyboard(.interactively)
         .phodoPage()
+        .sheet(item: $viewing) { PersonProfileView(person: $0).environment(\.theme, theme) }
     }
 
     private func row(_ person: Person) -> some View {
         HStack(spacing: 12) {
-            Avatar(person: person, size: 44)
-            VStack(alignment: .leading, spacing: 2) {
-                Text("@\(person.username)").font(PhFont.bold(17))
-                if !person.displayName.isEmpty && person.displayName != person.username {
-                    Text(person.displayName).font(PhFont.mono(13)).foregroundStyle(theme.softInk)
+            Button { viewing = person } label: {
+                HStack(spacing: 12) {
+                    Avatar(person: person, size: 44)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("@\(person.username)").font(PhFont.bold(17))
+                        if !person.displayName.isEmpty && person.displayName != person.username {
+                            Text(person.displayName).font(PhFont.mono(13)).foregroundStyle(theme.softInk)
+                        }
+                    }
                 }
             }
+            .buttonStyle(.plain)
             Spacer()
             action(for: person)
         }

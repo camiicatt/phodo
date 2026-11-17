@@ -22,7 +22,11 @@ final class AppStore {
     var connections: [Connection] = []
     var boards: [Board] = []
     private var boardPosts: [UUID: Post] = [:]   // saved posts not already loaded elsewhere
+    var liked: Set<UUID> = []                    // posts I've ♥'d
+    var likeCounts: [UUID: Int] = [:]            // ♥ from others, on MY posts only
+    var myStats = ProfileStats()
     var loadError: String?
+    private var started = false
 
     private(set) var themeID: String
     private(set) var reminderTime: Date?
@@ -57,10 +61,16 @@ final class AppStore {
     var friends: [Connection] { connections.filter { $0.status == .friends } }
     var incoming: [Connection] { connections.filter { $0.status == .incoming } }
 
-    /// Your own tags (most recent first), topped up with everyday starters.
-    var recentTags: [String] {
+    /// Exactly 5 suggestions: the tags you used most recently, topped up with
+    /// everyday starters. It never grows past 5.
+    var recentTags: [String] { Self.suggestedTags(from: myPosts) }
+
+    static func suggestedTags(from posts: [Post], limit: Int = 5) -> [String] {
+        let newestFirst = posts.sorted { $0.createdAt > $1.createdAt }
         var seen = Set<String>()
-        return (myPosts.flatMap(\.tags) + SampleData.starterTags).filter { seen.insert($0).inserted }
+        return (newestFirst.flatMap(\.tags) + SampleData.starterTags)
+            .filter { seen.insert($0).inserted }
+            .prefix(limit).map { $0 }
     }
 
     func status(of id: UUID) -> FriendStatus? { connections.first { $0.id == id }?.status }
@@ -69,6 +79,8 @@ final class AppStore {
 
     /// Called once at launch.
     func start() async {
+        guard !started else { return }   // SwiftUI can re-run .task; only start once
+        started = true
         guard let uid = await account.restore() else { phase = .signedOut; return }
         await enter(uid)
     }
@@ -158,26 +170,32 @@ final class AppStore {
 
     private func reset() {
         myPosts = []; feed = []; explore = []; connections = []; boards = []; boardPosts = [:]
+        liked = []; likeCounts = [:]; myStats = ProfileStats()
         me = SampleData.me
         phase = .signedOut
     }
 
     // MARK: loading
 
+    /// Loads each part separately, so one failure can't blank out the rest.
+    /// Failures are printed (visible in the Xcode / device console) and shown in the app.
     func load() async {
-        do {
-            async let mine = service.myPosts(me)
-            async let conns = social.connections()
-            async let bs = social.boards()
-            myPosts = try await mine
-            connections = try await conns
-            boards = try await bs
-            try await refreshFeeds()
-            await loadBoardPosts()
-            loadError = nil
-        } catch {
-            loadError = error.localizedDescription
+        var problems: [String] = []
+        func attempt(_ what: String, _ work: () async throws -> Void) async {
+            do { try await work() } catch {
+                print("[phodo] loading \(what) failed: \(error)")
+                problems.append(what)
+            }
         }
+        await attempt("your posts") { myPosts = try await service.myPosts(me) }
+        await attempt("friends") { connections = try await social.connections() }
+        await attempt("boards") { boards = try await social.boards(of: me.id) }
+        await attempt("feeds") { try await refreshFeeds() }
+        await loadBoardPosts()
+        await attempt("likes") { try await refreshLikes() }
+        await attempt("stats") { myStats = try await social.stats(for: me.id) }
+        loadError = problems.isEmpty ? nil : "couldn't load \(problems.joined(separator: ", ")). pull down to retry"
+        print("[phodo] loaded: \(myPosts.count) posts, \(connections.count) connections, \(boards.count) boards, feed \(feed.count), explore \(explore.count)")
     }
 
     func refreshFeeds() async throws {
@@ -209,6 +227,41 @@ final class AppStore {
     func post(_ id: UUID) -> Post? {
         myPosts.first { $0.id == id } ?? feed.first { $0.id == id }
             ?? explore.first { $0.id == id } ?? boardPosts[id]
+    }
+
+    // MARK: likes
+
+    func refreshLikes() async throws {
+        let ids = Array(Set((myPosts + feed + explore + Array(boardPosts.values)).map(\.id)))
+        let info = try await social.likes(on: ids)
+        liked = info.mine
+        likeCounts = info.counts
+    }
+
+    func isLiked(_ id: UUID) -> Bool { liked.contains(id) }
+
+    func toggleLike(_ post: Post) async {
+        if liked.contains(post.id) {
+            liked.remove(post.id)
+            try? await social.unlike(post.id)
+        } else {
+            liked.insert(post.id)
+            try? await social.like(post.id)
+        }
+    }
+
+    // MARK: other people
+
+    func profile(of id: UUID) async -> Person? { try? await account.profile(id) }
+    func posts(by id: UUID) async -> [Post] { (try? await service.posts(by: id)) ?? [] }
+    func publicBoards(of id: UUID) async -> [Board] { (try? await social.boards(of: id))?.filter(\.isPublic) ?? [] }
+    func posts(ids: [UUID]) async -> [Post] { (try? await service.posts(ids: ids)) ?? [] }
+    func stats(for id: UUID) async -> ProfileStats { (try? await social.stats(for: id)) ?? ProfileStats() }
+
+    /// Likes on posts loaded outside the main lists (someone's profile, a public board).
+    func noteLikes(for posts: [Post]) async {
+        guard let info = try? await social.likes(on: posts.map(\.id)) else { return }
+        liked.formUnion(info.mine)
     }
 
     // MARK: friends
@@ -260,19 +313,25 @@ final class AppStore {
         guard let i = boards.firstIndex(where: { $0.id == boardID }) else { return }
         if let j = boards[i].postIDs.firstIndex(of: postID) {
             boards[i].postIDs.remove(at: j)
-            try? await social.unsave(postID, from: boardID)
+            do { try await social.unsave(postID, from: boardID) } catch { report("removing from board", error) }
         } else {
             boards[i].postIDs.insert(postID, at: 0)
-            try? await social.save(postID, to: boardID)
+            do { try await social.save(postID, to: boardID) } catch { report("saving to board", error) }
         }
     }
 
     @discardableResult
     func createBoard(named name: String) async -> Board? {
         let clean = name.lowercased().trimmingCharacters(in: .whitespaces).replacingOccurrences(of: "#", with: "")
-        guard !clean.isEmpty, let board = try? await social.createBoard(named: clean) else { return nil }
-        boards.append(board)
-        return board
+        guard !clean.isEmpty else { return nil }
+        do {
+            let board = try await social.createBoard(named: clean)
+            boards.append(board)
+            return board
+        } catch {
+            report("making a board", error)
+            return nil
+        }
     }
 
     func renameBoard(_ id: UUID, to name: String) async {
@@ -282,9 +341,21 @@ final class AppStore {
         try? await social.renameBoard(id, to: clean)
     }
 
+    func setBoardPublic(_ id: UUID, _ isPublic: Bool) async {
+        guard let i = boards.firstIndex(where: { $0.id == id }) else { return }
+        boards[i].isPublic = isPublic
+        try? await social.setBoardPublic(id, isPublic)
+    }
+
     func deleteBoard(_ id: UUID) async {
         boards.removeAll { $0.id == id }
         try? await social.deleteBoard(id)
+    }
+
+    /// Print the full error (device console) and show a short version in the app banner.
+    private func report(_ what: String, _ error: Error) {
+        print("[phodo] \(what) failed: \(error)")
+        loadError = "\(what) didn't work: \(error.localizedDescription.lowercased())"
     }
 
     // MARK: preferences

@@ -24,6 +24,7 @@ struct ProfileView: View {
             VStack(alignment: .leading, spacing: 18) {
                 header
                 if !store.me.bio.isEmpty { Text(store.me.bio).font(PhFont.body(19)) }
+                StatsRow(stats: store.myStats)
                 if let avatarError { Text(avatarError).font(PhFont.mono(13)) }
 
                 HStack(spacing: 12) {
@@ -47,7 +48,7 @@ struct ProfileView: View {
             .foregroundStyle(theme.ink)
             .padding(.top, 12).padding(.bottom, 24)
         }
-        .refreshable { await store.load() }
+        .refreshable { await Task { await store.load() }.value }   // own task: SwiftUI cancels refresh tasks when the screen updates mid-refresh
         .phodoPage()
         .onChange(of: avatarItem) { _, item in Task { await setAvatar(item) } }
         .sheet(isPresented: $showEdit) { EditProfileSheet().environment(\.theme, theme) }

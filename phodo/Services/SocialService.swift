@@ -12,13 +12,21 @@ protocol SocialService {
     /// Unfriend, cancel a request, or decline one.
     func remove(_ id: UUID) async throws
 
-    // boards
-    func boards() async throws -> [Board]
+    // boards: yours (all), or someone else's (public ones only)
+    func boards(of userID: UUID) async throws -> [Board]
+    func setBoardPublic(_ id: UUID, _ isPublic: Bool) async throws
     func createBoard(named name: String) async throws -> Board
     func renameBoard(_ id: UUID, to name: String) async throws
     func deleteBoard(_ id: UUID) async throws
     func save(_ postID: UUID, to boardID: UUID) async throws
     func unsave(_ postID: UUID, from boardID: UUID) async throws
+
+    // likes
+    /// Which of these posts I've liked, and like counts on MY posts (others' likes only).
+    func likes(on postIDs: [UUID]) async throws -> (mine: Set<UUID>, counts: [UUID: Int])
+    func like(_ postID: UUID) async throws
+    func unlike(_ postID: UUID) async throws
+    func stats(for userID: UUID) async throws -> ProfileStats
 
     // safety
     func report(post: UUID?, user: UUID, reason: String) async throws
@@ -108,12 +116,18 @@ final class SupabaseSocialService: SocialService {
 
     // MARK: boards
 
-    func boards() async throws -> [Board] {
+    func boards(of userID: UUID) async throws -> [Board] {
         struct Item: Decodable { let post_id: UUID }
-        struct Row: Decodable { let id: UUID; let name: String; let board_items: [Item] }
-        let rows: [Row] = try await client.from("boards").select("id, name, board_items(post_id, added_at)")
+        struct Row: Decodable { let id: UUID; let name: String; let is_public: Bool; let board_items: [Item] }
+        // RLS: for someone else this only returns their public boards
+        let rows: [Row] = try await client.from("boards").select("id, name, is_public, board_items(post_id, added_at)")
+            .eq("user_id", value: userID.lower)
             .order("created_at").execute().value
-        return rows.map { Board(id: $0.id, name: $0.name, postIDs: $0.board_items.map(\.post_id)) }
+        return rows.map { Board(id: $0.id, name: $0.name, postIDs: $0.board_items.map(\.post_id), isPublic: $0.is_public) }
+    }
+
+    func setBoardPublic(_ id: UUID, _ isPublic: Bool) async throws {
+        try await client.from("boards").update(["is_public": isPublic]).eq("id", value: id.lower).execute()
     }
 
     func createBoard(named name: String) async throws -> Board {
@@ -141,6 +155,38 @@ final class SupabaseSocialService: SocialService {
     func unsave(_ postID: UUID, from boardID: UUID) async throws {
         try await client.from("board_items").delete()
             .eq("board_id", value: boardID.lower).eq("post_id", value: postID.lower).execute()
+    }
+
+    // MARK: likes
+
+    func likes(on postIDs: [UUID]) async throws -> (mine: Set<UUID>, counts: [UUID: Int]) {
+        guard !postIDs.isEmpty else { return ([], [:]) }
+        struct Row: Decodable { let post_id: UUID; let user_id: UUID }
+        // RLS returns: my likes + likes on my posts
+        let rows: [Row] = try await client.from("likes").select("post_id, user_id")
+            .in("post_id", values: postIDs.map(\.lower)).execute().value
+        let me = try me
+        let mine = Set(rows.filter { $0.user_id == me }.map(\.post_id))
+        let counts = Dictionary(grouping: rows.filter { $0.user_id != me }, by: \.post_id).mapValues(\.count)
+        return (mine, counts)
+    }
+
+    func like(_ postID: UUID) async throws {
+        struct New: Encodable { let post_id: UUID }
+        do { try await client.from("likes").insert(New(post_id: postID)).execute() }
+        catch where isUniqueViolation(error) {}
+    }
+
+    func unlike(_ postID: UUID) async throws {
+        try await client.from("likes").delete()
+            .eq("post_id", value: postID.lower).eq("user_id", value: try me.lower).execute()
+    }
+
+    func stats(for userID: UUID) async throws -> ProfileStats {
+        struct Row: Decodable { let likes: Int; let saves: Int; let friends: Int }
+        let rows: [Row] = try await client.rpc("profile_stats", params: ["target": userID.lower]).execute().value
+        guard let r = rows.first else { return ProfileStats() }
+        return ProfileStats(likes: r.likes, saves: r.saves, friends: r.friends)
     }
 
     // MARK: safety
@@ -190,7 +236,22 @@ final class MockSocialService: SocialService {
 
     func remove(_ id: UUID) async throws { conns.removeAll { $0.id == id } }
 
-    func boards() async throws -> [Board] { boardList }
+    private var liked: Set<UUID> = []
+
+    func boards(of userID: UUID) async throws -> [Board] { boardList }
+
+    func setBoardPublic(_ id: UUID, _ isPublic: Bool) async throws {
+        if let i = boardList.firstIndex(where: { $0.id == id }) { boardList[i].isPublic = isPublic }
+    }
+
+    func likes(on postIDs: [UUID]) async throws -> (mine: Set<UUID>, counts: [UUID: Int]) {
+        (liked.intersection(postIDs), [:])
+    }
+    func like(_ postID: UUID) async throws { liked.insert(postID) }
+    func unlike(_ postID: UUID) async throws { liked.remove(postID) }
+    func stats(for userID: UUID) async throws -> ProfileStats {
+        ProfileStats(likes: 12, saves: 4, friends: conns.filter { $0.status == .friends }.count)
+    }
 
     func createBoard(named name: String) async throws -> Board {
         let b = Board(id: UUID(), name: name, postIDs: [])

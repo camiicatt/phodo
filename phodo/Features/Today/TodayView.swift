@@ -30,6 +30,7 @@ struct TodayView: View {
     @State private var isPosting = false
     @State private var errorText: String?
     @State private var justPosted = false
+    @State private var postedCount = 0      // vibration on each successful post
 
     private let visibilities: [PostVisibility] = [.friends, .everyone, .justMe]
 
@@ -45,6 +46,7 @@ struct TodayView: View {
         }
         .scrollDismissesKeyboard(.interactively)
         .phodoPage()
+        .sensoryFeedback(.success, trigger: postedCount)
         .onChange(of: pickerItem) { _, item in Task { await load(item) } }
         .fullScreenCover(isPresented: $showCamera) {
             CameraPicker { image in
@@ -213,9 +215,11 @@ struct TodayView: View {
         }
     }
 
+    /// The 5 suggestions, plus any tag you've picked or typed for THIS post
+    /// (so you can see and un-pick it). Nothing extra sticks around afterwards.
     private var tagOptions: [String] {
-        var seen = Set<String>()
-        return (selectedTags + store.recentTags).filter { seen.insert($0).inserted }.prefix(10).map { $0 }
+        let suggested = store.recentTags
+        return suggested + selectedTags.filter { !suggested.contains($0) }
     }
 
     // MARK: actions
@@ -263,6 +267,7 @@ struct TodayView: View {
         do {
             try await store.publish(draft)
             clearPhoto(); caption = ""; selectedTags = []; errorText = nil
+            postedCount += 1
             justPosted = true
             try? await Task.sleep(for: .seconds(2))
             justPosted = false

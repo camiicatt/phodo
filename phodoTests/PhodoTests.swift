@@ -229,6 +229,35 @@ final class PostingTests: XCTestCase {
 }
 
 @MainActor
+final class TagTests: XCTestCase {
+    private func post(_ tags: [String], minutesAgo: Double) -> Post {
+        var p = Post(id: UUID(), author: SampleData.me, day: .today, caption: "x", tags: tags,
+                     visibility: .friends, image: nil, aspect: 1, tint: nil)
+        p.createdAt = Date().addingTimeInterval(-minutesAgo * 60)
+        return p
+    }
+
+    func testNewUserGetsFiveStarters() {
+        XCTAssertEqual(AppStore.suggestedTags(from: []), Array(SampleData.starterTags.prefix(5)))
+    }
+
+    func testMostRecentFirstAndNeverMoreThanFive() {
+        let posts = [post(["old1", "old2"], minutesAgo: 300),
+                     post(["beach", "tacos", "beach"], minutesAgo: 5),
+                     post(["gym", "rain", "late", "ramen"], minutesAgo: 60)]
+        let tags = AppStore.suggestedTags(from: posts)
+        XCTAssertEqual(tags, ["beach", "tacos", "gym", "rain", "late"])   // newest post first, no dupes
+        XCTAssertEqual(tags.count, 5)
+    }
+
+    func testFewTagsTopUpWithStarters() {
+        let tags = AppStore.suggestedTags(from: [post(["beach"], minutesAgo: 1)])
+        XCTAssertEqual(tags.first, "beach")
+        XCTAssertEqual(tags.count, 5)
+    }
+}
+
+@MainActor
 final class FriendTests: XCTestCase {
     func testRequestAcceptRemove() async throws {
         let social = MockSocialService(seed: false)
@@ -252,16 +281,37 @@ final class FriendTests: XCTestCase {
         XCTAssertTrue(none.isEmpty)
     }
 
+    func testLikeAndUnlike() async throws {
+        let social = MockSocialService(seed: false)
+        let post = UUID(), other = UUID()
+        try await social.like(post)
+        try await social.like(post)                          // liking twice is fine
+        var info = try await social.likes(on: [post, other])
+        XCTAssertEqual(info.mine, [post])
+        try await social.unlike(post)
+        info = try await social.likes(on: [post])
+        XCTAssertTrue(info.mine.isEmpty)
+    }
+
+    func testBoardCanBeMadePublic() async throws {
+        let social = MockSocialService(seed: false)
+        let board = try await social.createBoard(named: "fits")
+        XCTAssertFalse(board.isPublic)                       // private by default
+        try await social.setBoardPublic(board.id, true)
+        let boards = try await social.boards(of: UUID())
+        XCTAssertEqual(boards.first?.isPublic, true)
+    }
+
     func testBoardsSaveAndUnsave() async throws {
         let social = MockSocialService(seed: false)
         let board = try await social.createBoard(named: "cozy")
         let post = UUID()
         try await social.save(post, to: board.id)
         try await social.save(post, to: board.id)           // saving twice doesn't duplicate
-        var boards = try await social.boards()
+        var boards = try await social.boards(of: UUID())
         XCTAssertEqual(boards.first?.postIDs, [post])
         try await social.unsave(post, from: board.id)
-        boards = try await social.boards()
+        boards = try await social.boards(of: UUID())
         XCTAssertEqual(boards.first?.postIDs, [])
     }
 }

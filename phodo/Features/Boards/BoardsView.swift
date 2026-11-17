@@ -17,15 +17,35 @@ struct BoardsView: View {
 
         ScrollView {
             VStack(spacing: 22) {
-                ScreenHeader(title: board?.name ?? "boards", trailing: board == nil ? "" : "\(posts.count) saved")
+                ScreenHeader(title: board?.name ?? "boards",
+                             trailing: board == nil ? "" : "\(board!.isPublic ? "public · " : "")\(posts.count) saved")
+
+                if let board {
+                    HStack {
+                        Toggle(isOn: Binding(get: { board.isPublic },
+                                             set: { on in Task { await store.setBoardPublic(board.id, on) } })) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("public board").font(PhFont.body(17))
+                                Text(board.isPublic ? "shows on your profile for anyone" : "only you can see it")
+                                    .font(PhFont.mono(12)).foregroundStyle(theme.softInk)
+                            }
+                        }
+                    }
+                }
 
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 10) {
                         ForEach(store.boards) { b in
-                            Button { selectedID = b.id } label: { TagChip(text: "#\(b.name)", selected: b.id == board?.id) }
+                            Button { selectedID = b.id } label: {
+                                TagChip(text: "#\(b.name)\(b.isPublic ? " ◎" : "")", selected: b.id == board?.id)
+                            }
                                 .buttonStyle(.plain)
                                 .contextMenu {
                                     Button { nameField = b.name; renaming = b } label: { Label("rename", systemImage: "pencil") }
+                                    Button { Task { await store.setBoardPublic(b.id, !b.isPublic) } } label: {
+                                        Label(b.isPublic ? "make private" : "make public",
+                                              systemImage: b.isPublic ? "lock" : "globe")
+                                    }
                                     Button(role: .destructive) { deleting = b } label: { Label("delete board", systemImage: "trash") }
                                 }
                         }
@@ -55,7 +75,7 @@ struct BoardsView: View {
             .foregroundStyle(theme.ink)
             .padding(.top, 12).padding(.bottom, 24)
         }
-        .refreshable { await store.load() }
+        .refreshable { await Task { await store.load() }.value }   // own task: SwiftUI cancels refresh tasks when the screen updates mid-refresh
         .phodoPage()
         .alert("new board", isPresented: $creating) {
             TextField("name", text: $nameField).textInputAutocapitalization(.never)
