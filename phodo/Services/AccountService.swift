@@ -40,6 +40,8 @@ protocol AccountService {
     func restore() async -> UUID?
     func sendCode(to email: String) async throws
     func verify(email: String, code: String) async throws -> UUID
+    /// Password sign-in. Only used for Apple's App Review account (they can't read our emails).
+    func signIn(email: String, password: String) async throws -> UUID
     /// The sign-in link from the email opened phodo (phodo://login-callback?...).
     func handle(link: URL) async throws -> UUID
     /// nil = signed in but hasn't claimed a username yet.
@@ -92,6 +94,10 @@ final class SupabaseAccountService: AccountService {
 
     func handle(link: URL) async throws -> UUID {
         try await client.auth.session(from: link).user.id
+    }
+
+    func signIn(email: String, password: String) async throws -> UUID {
+        try await client.auth.signIn(email: email, password: password).user.id
     }
 
     func profile(_ id: UUID) async throws -> Person? {
@@ -176,6 +182,7 @@ final class MockAccountService: AccountService {
         return UUID()
     }
     func handle(link: URL) async throws -> UUID { UUID() }
+    func signIn(email: String, password: String) async throws -> UUID { UUID() }
     func profile(_ id: UUID) async throws -> Person? { profiles[id] }
     func isAvailable(username: String) async throws -> Bool { !taken.contains(username) }
     func createProfile(_ p: Person) async throws {

@@ -239,6 +239,7 @@ struct SettingsSheet: View {
             if let deleteError { Text(deleteError).font(PhFont.mono(13)) }
             HStack(spacing: 16) {
                 Link("privacy", destination: URL(string: "https://phodo.app/privacy")!)
+                Link("terms", destination: URL(string: "https://phodo.app/terms")!)
                 Link("help: hi@phodo.app", destination: URL(string: "mailto:hi@phodo.app")!)
             }
             .font(PhFont.mono(13)).foregroundStyle(theme.softInk)

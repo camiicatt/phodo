@@ -95,6 +95,13 @@ final class AppStore {
         await enter(uid)
     }
 
+    /// The one account that signs in with a password: Apple's App Review.
+    static let reviewEmail = "review@phodo.app"
+
+    func signInForReview(password: String) async throws {
+        await enter(try await account.signIn(email: Self.reviewEmail, password: password))
+    }
+
     /// Called when the email sign-in link opens the app.
     func handleLink(_ url: URL) async {
         guard phase == .signedOut || phase == .loading else { return }

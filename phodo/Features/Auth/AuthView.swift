@@ -11,7 +11,14 @@ struct AuthView: View {
     @State private var codeSent = false
     @State private var busy = false
     @State private var errorText: String?
+    @State private var password = ""
+    @State private var agreed = false
     @FocusState private var focused: Bool
+
+    /// Apple's reviewer can't receive our emails, so this one address uses a password.
+    private var isReviewAccount: Bool {
+        email.trimmingCharacters(in: .whitespaces).lowercased() == AppStore.reviewEmail
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 22) {
@@ -22,14 +29,22 @@ struct AuthView: View {
             InkLine().padding(.vertical, 8)
 
             if !codeSent {
-                field("email", text: $email, prompt: "you@school.edu")
+                field("email", text: $email, prompt: "you@example.com")
                     .keyboardType(.emailAddress)
                     .textContentType(.emailAddress)
-                Button { Task { await send() } } label: {
-                    if busy { ProgressView().tint(theme.bg) } else { Text("send me a code") }
+                if isReviewAccount {
+                    VStack(spacing: 8) {
+                        FieldLabel("password (app review)")
+                        SecureField("", text: $password).font(PhFont.body(22)).focused($focused)
+                        InkLine()
+                    }
+                }
+                terms
+                Button { Task { isReviewAccount ? await reviewSignIn() : await send() } } label: {
+                    if busy { ProgressView().tint(theme.bg) } else { Text(isReviewAccount ? "let me in" : "send me a code") }
                 }
                 .buttonStyle(PrimaryButtonStyle())
-                .disabled(busy || !email.contains("@"))
+                .disabled(busy || !email.contains("@") || !agreed || (isReviewAccount && password.isEmpty))
             } else {
                 VStack(alignment: .leading, spacing: 6) {
                     Text("check your email ✉︎").font(PhFont.bold(22))
@@ -73,6 +88,32 @@ struct AuthView: View {
                 Spacer()
                 Button("done") { focused = false }.font(PhFont.bold(17))
             }
+        }
+    }
+
+    /// Apple requires people to agree to terms that forbid objectionable content.
+    private var terms: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Button { agreed.toggle() } label: {
+                Image(systemName: agreed ? "checkmark.square.fill" : "square")
+                    .font(.system(size: 22)).foregroundStyle(theme.ink)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("agree to the terms and privacy policy")
+            .accessibilityAddTraits(agreed ? .isSelected : [])
+            Text("i agree to the [terms](https://phodo.app/terms) and [privacy policy](https://phodo.app/privacy). no bullying, nudity, hate or spam. we remove it and the people who post it.")
+                .font(PhFont.mono(12)).foregroundStyle(theme.softInk)
+                .tint(theme.ink)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private func reviewSignIn() async {
+        busy = true; defer { busy = false }
+        do {
+            try await store.signInForReview(password: password)
+        } catch {
+            errorText = "wrong password"
         }
     }
 
