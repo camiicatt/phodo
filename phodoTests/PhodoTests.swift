@@ -89,6 +89,7 @@ final class ThemeTests: XCTestCase {
             XCTAssertGreaterThanOrEqual(contrast(t.softInk, t.bg), 4.5, "\(preset.id): softInk on bg")
             XCTAssertGreaterThanOrEqual(contrast(t.softInk, t.card), 4.5, "\(preset.id): softInk on card")
             XCTAssertGreaterThanOrEqual(contrast(t.bg, t.ink), 7, "\(preset.id): button text")
+            XCTAssertGreaterThanOrEqual(contrast(t.frame, t.bg), 1.4, "\(preset.id): photo frame stands out from the page")
         }
     }
 
@@ -97,6 +98,33 @@ final class ThemeTests: XCTestCase {
             let bg = luminance(Theme(preset: preset).bg)
             XCTAssertGreaterThan(bg, 0.02, "\(preset.id) background is too close to black")
         }
+    }
+
+    /// Renders the full-screen photo viewer in a light and a dark theme (tmp/phodo-viewer.png).
+    @MainActor
+    func testRenderPhotoViewer() throws {
+        // a stand-in "photo": warm sunset gradient
+        let size = CGSize(width: 900, height: 1200)
+        let photo = UIGraphicsImageRenderer(size: size).image { ctx in
+            let colors = [UIColor(red: 0.98, green: 0.72, blue: 0.45, alpha: 1).cgColor,
+                          UIColor(red: 0.55, green: 0.35, blue: 0.62, alpha: 1).cgColor]
+            let g = CGGradient(colorsSpace: CGColorSpaceCreateDeviceRGB(), colors: colors as CFArray, locations: [0, 1])!
+            ctx.cgContext.drawLinearGradient(g, start: .zero, end: CGPoint(x: 0, y: size.height), options: [])
+        }
+        let author = Person(id: UUID(), username: "brucious", displayName: "bruce")
+        let post = Post(id: UUID(), author: author, day: .today, caption: "golden hour on the walk home",
+                        tags: ["sunset"], visibility: .friends, image: photo, aspect: 4.0 / 3.0, tint: nil)
+        let pair = HStack(spacing: 0) {
+            ForEach([ThemePreset.lavender, ThemePreset.darks[0]]) { preset in
+                PhotoViewer(post: post).environment(\.theme, Theme(preset: preset))
+                    .frame(width: 393, height: 852)
+            }
+        }
+        let renderer = ImageRenderer(content: pair)
+        renderer.scale = 1
+        let rendered = renderer.uiImage
+        let data = try XCTUnwrap(rendered?.pngData())
+        try data.write(to: FileManager.default.temporaryDirectory.appendingPathComponent("phodo-viewer.png"))
     }
 
     /// Renders real components in every theme into one image (for eyeballing).
@@ -126,7 +154,8 @@ final class ThemeTests: XCTestCase {
         }
         let renderer = ImageRenderer(content: gallery)
         renderer.scale = 2
-        let data = try XCTUnwrap(renderer.uiImage?.pngData())
+        let rendered = renderer.uiImage
+        let data = try XCTUnwrap(rendered?.pngData())
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("phodo-theme-gallery.png")
         try data.write(to: url)
         print("theme gallery: \(url.path)")
@@ -273,6 +302,19 @@ final class FriendTests: XCTestCase {
         XCTAssertTrue(conns.isEmpty)
     }
 
+    func testDuplicateRequestsMergeIntoOneFriend() {
+        let p = SampleData.friends[0]
+        let merged = Connection.merged([
+            Connection(person: p, status: .outgoing),     // I asked them
+            Connection(person: p, status: .friends),      // and they asked me, which I accepted
+        ])
+        XCTAssertEqual(merged.count, 1)
+        XCTAssertEqual(merged.first?.status, .friends)
+
+        let pending = Connection.merged([Connection(person: p, status: .outgoing), Connection(person: p, status: .incoming)])
+        XCTAssertEqual(pending.first?.status, .incoming)  // show "accept", not "requested"
+    }
+
     func testSearchByUsernamePrefix() async throws {
         let social = MockSocialService(seed: false)
         let found = try await social.search("Ju")
@@ -313,5 +355,31 @@ final class FriendTests: XCTestCase {
         try await social.unsave(post, from: board.id)
         boards = try await social.boards(of: UUID())
         XCTAssertEqual(boards.first?.postIDs, [])
+    }
+
+    func testPostPingsAreOnUntilMuted() async throws {
+        let social = MockSocialService(seed: false)
+        let friend = UUID()
+        var muted = try await social.mutes()
+        XCTAssertTrue(muted.isEmpty, "nobody is muted to start, so every friend pings")
+        try await social.setMuted(friend, muted: true)
+        muted = try await social.mutes()
+        XCTAssertEqual(muted, [friend])
+        try await social.setMuted(friend, muted: false)
+        muted = try await social.mutes()
+        XCTAssertTrue(muted.isEmpty)
+    }
+
+    @MainActor
+    func testNewCountOnlyCountsUnseenPosts() throws {
+        let defaults = UserDefaults(suiteName: "phodo.tests.\(UUID())")!
+        let store = AppStore(defaults: defaults)
+        store.feedSeenAt = .distantPast
+        store.feed = SampleData.friendPosts()
+        let total = store.newFeedCount
+        XCTAssertGreaterThan(total, 0)
+        store.markFeedSeen()
+        XCTAssertEqual(store.newFeedCount, 0, "after looking at the feed nothing is new")
+        UserDefaults.standard.removeObject(forKey: "feedSeenAt")
     }
 }

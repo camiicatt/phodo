@@ -31,6 +31,10 @@ struct TodayView: View {
     @State private var errorText: String?
     @State private var justPosted = false
     @State private var postedCount = 0      // vibration on each successful post
+    @State private var writingWords = false  // "just write" without a pic
+
+    /// The details (caption, tags, who sees it, post) only show once there's something to post.
+    private var hasDraft: Bool { edited != nil || writingWords }
 
     private let visibilities: [PostVisibility] = [.friends, .everyone, .justMe]
 
@@ -46,10 +50,13 @@ struct TodayView: View {
         }
         .scrollDismissesKeyboard(.interactively)
         .phodoPage()
+        // a firm thunk, then the "done" buzz
+        .sensoryFeedback(.impact(weight: .heavy, intensity: 1), trigger: postedCount)
         .sensoryFeedback(.success, trigger: postedCount)
         .onChange(of: pickerItem) { _, item in Task { await load(item) } }
         .fullScreenCover(isPresented: $showCamera) {
             CameraPicker { image in
+                PhotoSaver.save(image)       // keep a copy in their Photos, full quality
                 if let data = image.jpegData(compressionQuality: 0.95) { setBase(PhotoProcessor.downsample(data)) }
             }
             .ignoresSafeArea()
@@ -87,7 +94,7 @@ struct TodayView: View {
                     .labelsHidden()
                 if day != .today {
                     Button { forDate = Date() } label: { TagChip(text: "back to today", dashed: true) }
-                        .buttonStyle(.plain)
+                        .buttonStyle(SquishStyle())
                 }
                 Spacer(minLength: 0)
             }
@@ -101,62 +108,67 @@ struct TodayView: View {
         VStack(spacing: 22) {
             dropZone
 
-            VStack(spacing: 10) {
-                FieldLabel("caption")
-                TextField("", text: $caption, prompt: Text("say whatever...").foregroundStyle(theme.softInk.opacity(0.7)),
-                          axis: .vertical)
-                    .font(PhFont.body(22)).foregroundStyle(theme.ink)
-                    .lineLimit(1...4)
-                    .focused($captionFocused)
-                    .toolbar {
-                        ToolbarItemGroup(placement: .keyboard) {
-                            Spacer()
-                            Button("done") { captionFocused = false }.font(PhFont.bold(17))
-                        }
+            if hasDraft {
+                Group {
+                    VStack(spacing: 10) {
+                        FieldLabel("caption")
+                        TextField("", text: $caption, prompt: Text("say whatever...").foregroundStyle(theme.softInk.opacity(0.7)),
+                                  axis: .vertical)
+                            .font(PhFont.body(22)).foregroundStyle(theme.ink)
+                            .lineLimit(1...4)
+                            .focused($captionFocused)
+                            .toolbar {
+                                ToolbarItemGroup(placement: .keyboard) {
+                                    Spacer()
+                                    Button("done") { captionFocused = false }.font(PhFont.bold(17))
+                                }
+                            }
+                        InkLine()
                     }
-                InkLine()
-            }
-
-            VStack(spacing: 12) {
-                FieldLabel("tags")
-                FlowLayout(spacing: 10) {
-                    ForEach(tagOptions, id: \.self) { tag in
-                        Button { toggleTag(tag) } label: {
-                            TagChip(text: "#\(tag)", selected: selectedTags.contains(tag))
+                    .riseIn(0)
+                    VStack(spacing: 12) {
+                        FieldLabel("tags")
+                        FlowLayout(spacing: 10) {
+                            ForEach(tagOptions, id: \.self) { tag in
+                                Button { toggleTag(tag) } label: {
+                                    TagChip(text: "#\(tag)", selected: selectedTags.contains(tag))
+                                }
+                                .buttonStyle(.plain)
+                            }
+                            Button { addingTag = true } label: { TagChip(text: "+ add", dashed: true) }
+                                .buttonStyle(SquishStyle())
                         }
-                        .buttonStyle(.plain)
-                    }
-                    Button { addingTag = true } label: { TagChip(text: "+ add", dashed: true) }
-                        .buttonStyle(.plain)
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-            }
-
-            VStack(spacing: 10) {
-                FieldLabel("who sees it")
-                HStack {
-                    PillToggle(options: visibilities.map(\.label), selection: $visibility)
-                    Spacer(minLength: 0)
-                }
-                if visibilities[visibility] == .everyone {
-                    Text("anyone on phodo can see this in explore")
-                        .font(PhFont.mono(12)).foregroundStyle(theme.softInk)
                         .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .riseIn(1)
+                    VStack(spacing: 10) {
+                        FieldLabel("who sees it")
+                        HStack {
+                            PillToggle(options: visibilities.map(\.label), selection: $visibility)
+                            Spacer(minLength: 0)
+                        }
+                        if visibilities[visibility] == .everyone {
+                            Text("anyone on phodo can see this in explore")
+                                .font(PhFont.mono(12)).foregroundStyle(theme.softInk)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                    }
+                    .riseIn(2)
+                    if let errorText {
+                        Text(errorText).font(PhFont.mono(13)).foregroundStyle(theme.ink)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    Button { Task { await post() } } label: {
+                        if isPosting { ProgressView().tint(theme.bg) }
+                        else { Text(justPosted ? "posted ✓" : (day == .today ? "post it" : "post for \(day.short)")) }
+                    }
+                    .buttonStyle(PrimaryButtonStyle())
+                    .disabled(isPosting || (edited == nil && caption.trimmingCharacters(in: .whitespaces).isEmpty))
+                    .riseIn(3)
                 }
             }
-
-            if let errorText {
-                Text(errorText).font(PhFont.mono(13)).foregroundStyle(theme.ink)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            }
-
-            Button { Task { await post() } } label: {
-                if isPosting { ProgressView().tint(theme.bg) }
-                else { Text(justPosted ? "posted ✓" : (day == .today ? "post it" : "post for \(day.short)")) }
-            }
-            .buttonStyle(PrimaryButtonStyle())
-            .disabled(isPosting || (edited == nil && caption.trimmingCharacters(in: .whitespaces).isEmpty))
         }
+        .animation(.spring(response: 0.45, dampingFraction: 0.85), value: hasDraft)
     }
 
     @ViewBuilder
@@ -165,21 +177,28 @@ struct TodayView: View {
             VStack(spacing: 12) {
                 PhotoTile(image: edited, aspect: edited.size.height / max(edited.size.width, 1))
                 HStack(spacing: 10) {
-                    Button { showEditor = true } label: { TagChip(text: "edit") }.buttonStyle(.plain)
+                    Button { showEditor = true } label: { TagChip(text: "edit") }.buttonStyle(SquishStyle())
                     PhotosPicker(selection: $pickerItem, matching: .images) { TagChip(text: "swap") }
                     Spacer()
-                    Button { clearPhoto() } label: { TagChip(text: "remove", dashed: true) }.buttonStyle(.plain)
+                    Button { clearPhoto() } label: { TagChip(text: "remove", dashed: true) }.buttonStyle(SquishStyle())
                 }
             }
         } else {
             VStack(spacing: 14) {
                 Image(systemName: "plus.circle").font(.system(size: 40, weight: .thin))
                 Text(day == .today ? "drop today's pic" : "drop a pic from \(day.short)").font(PhFont.bold(24))
-                Text("or skip it, words are fine").font(PhFont.mono(14)).foregroundStyle(theme.softInk)
+                Button {
+                    writingWords.toggle()
+                    if writingWords { Task { try? await Task.sleep(for: .milliseconds(350)); captionFocused = true } }
+                } label: {
+                    Text(writingWords ? "never mind, no words" : "or just write ✎")
+                        .font(PhFont.mono(14)).foregroundStyle(theme.softInk).underline()
+                }
+                .buttonStyle(SquishStyle())
                 HStack(spacing: 10) {
                     if CameraPicker.isAvailable && day == .today {
                         Button { showCamera = true } label: { TagChip(text: "take one", selected: true) }
-                            .buttonStyle(.plain)
+                            .buttonStyle(SquishStyle())
                     }
                     PhotosPicker(selection: $pickerItem, matching: .images) {
                         TagChip(text: "pick one", selected: !(CameraPicker.isAvailable && day == .today))
@@ -246,6 +265,11 @@ struct TodayView: View {
         baseImage = nil; edited = nil; pickerItem = nil; edits = EditSettings()
     }
 
+    /// After posting: back to the clean landing look.
+    private func resetComposer() {
+        clearPhoto(); caption = ""; selectedTags = []; errorText = nil; writingWords = false
+    }
+
     private func toggleTag(_ tag: String) {
         if let i = selectedTags.firstIndex(of: tag) { selectedTags.remove(at: i) } else { selectedTags.append(tag) }
     }
@@ -266,13 +290,31 @@ struct TodayView: View {
                               tags: selectedTags, visibility: visibilities[visibility], photo: photo)
         do {
             try await store.publish(draft)
-            clearPhoto(); caption = ""; selectedTags = []; errorText = nil
             postedCount += 1
+            withAnimation(.spring(response: 0.45, dampingFraction: 0.85)) { resetComposer() }
             justPosted = true
             try? await Task.sleep(for: .seconds(2))
             justPosted = false
         } catch {
             errorText = error.localizedDescription.lowercased()
         }
+    }
+}
+
+/// Slides up a little and fades in; each `index` waits a beat longer, so the
+/// sections arrive one after another from the bottom.
+private struct Rise: ViewModifier {
+    let shown: Bool
+    func body(content: Content) -> some View {
+        content.opacity(shown ? 1 : 0).offset(y: shown ? 0 : 36)
+    }
+}
+
+private extension View {
+    func riseIn(_ index: Int) -> some View {
+        transition(.asymmetric(
+            insertion: .modifier(active: Rise(shown: false), identity: Rise(shown: true))
+                .animation(.spring(response: 0.5, dampingFraction: 0.82).delay(0.06 * Double(index))),
+            removal: .opacity.animation(.easeOut(duration: 0.15))))
     }
 }

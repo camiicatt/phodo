@@ -19,6 +19,7 @@ struct PostCard: View {
     @State private var confirmDelete = false
     @State private var viewing: Person?
     @State private var heartPop = false
+    @State private var expanded = false   // full-screen photo
     @State private var likeTaps = 0      // drives the vibration: only on your taps, never on load
 
     private var isMine: Bool { post.author.id == store.me.id }
@@ -37,6 +38,9 @@ struct PostCard: View {
                             .allowsHitTesting(false)
                     }
                     .onTapGesture(count: 2) { doubleTapLike() }
+                    .onTapGesture { expanded = true }
+                    .accessibilityAddTraits(.isButton)
+                    .accessibilityHint("tap to open, double-tap to love")
             }
             if showAuthor {
                 HStack(spacing: 8) {
@@ -74,6 +78,9 @@ struct PostCard: View {
         .sensoryFeedback(.impact(weight: .light), trigger: likeTaps)
         .sheet(isPresented: $saving) {
             SaveToBoardSheet(post: post).environment(\.theme, theme).presentationDetents([.medium, .large])
+        }
+        .fullScreenCover(isPresented: $expanded) {
+            PhotoViewer(post: post).environment(\.theme, theme)
         }
         .sheet(item: $viewing) { person in
             PersonProfileView(person: person).environment(\.theme, theme)

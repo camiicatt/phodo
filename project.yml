@@ -18,7 +18,7 @@ settings:
   base:
     SWIFT_VERSION: "5.0"
     MARKETING_VERSION: "0.1.0"
-    CURRENT_PROJECT_VERSION: "1"
+    CURRENT_PROJECT_VERSION: "3"
     DEVELOPMENT_TEAM: PRRWSX8GBA  # Camille Rivera (Individual, paid developer program)
     CODE_SIGN_STYLE: Automatic
 targets:
@@ -35,10 +35,12 @@ targets:
         CFBundleDisplayName: phodo
         CFBundleShortVersionString: $(MARKETING_VERSION)
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
-        UILaunchScreen: {}
+        UILaunchScreen:
+          UIColorName: LaunchBg   # lavender, so the cat intro starts on the same color
         ITSAppUsesNonExemptEncryption: false   # only standard HTTPS, skips the export question on upload
         UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
         NSCameraUsageDescription: "so you can snap today's pic."
+        NSPhotoLibraryAddUsageDescription: "so pics you take in phodo also land in your Photos."
         CFBundleURLTypes:
           - CFBundleURLName: app.phodo
             CFBundleURLSchemes: [phodo]          # phodo://login-callback (email sign-in links)
@@ -52,6 +54,7 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: app.phodo   # reverse of phodo.app; permanent once you upload a build
         TARGETED_DEVICE_FAMILY: "1"
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        CODE_SIGN_ENTITLEMENTS: phodo/phodo.entitlements   # push notifications
   phodoTests:
     type: bundle.unit-test
     platform: iOS

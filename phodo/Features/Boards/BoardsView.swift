@@ -50,7 +50,7 @@ struct BoardsView: View {
                                 }
                         }
                         Button { nameField = ""; creating = true } label: { TagChip(text: "+ new", dashed: true) }
-                            .buttonStyle(.plain)
+                            .buttonStyle(SquishStyle())
                     }
                     .padding(1)
                 }

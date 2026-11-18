@@ -50,6 +50,9 @@ struct ThemePreset: Identifiable, Hashable {
 ///   accent              → focus, "today" marker
 ///   softInk             → secondary text (#4A4560)
 ///   ink       darkest   → text, 1px lines, primary buttons (#1C1A27)
+///
+///   frame               → the mat around a full-screen photo: a deeper shade of the
+///                         same hue (lighter in dark themes) so the picture stands out
 struct Theme {
     let preset: ThemePreset
     let isDark: Bool
@@ -62,6 +65,7 @@ struct Theme {
     let accent: Color
     let softInk: Color
     let ink: Color
+    let frame: Color
 
     init(preset: ThemePreset) {
         self.preset = preset
@@ -72,6 +76,7 @@ struct Theme {
         }
         card = c(s.card); chip = c(s.chip); bg = c(s.bg); sunken = c(s.sunken)
         photoTint = c(s.photoTint); accent = c(s.accent); softInk = c(s.softInk); ink = c(s.ink)
+        frame = preset.dark ? c((0.32, 0.50)) : c((0.40, 0.72))
     }
 
     /// (saturation, brightness) for each token. Light values were measured from the

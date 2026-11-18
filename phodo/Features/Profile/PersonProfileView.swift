@@ -65,7 +65,14 @@ struct PersonProfileView: View {
 
                 HStack(spacing: 12) {
                     friendButton
+                    if store.status(of: person.id) == .friends { BellButton(person: shown) }
                     PillToggle(options: ["pics", "boards"], selection: $mode)
+                }
+                if store.status(of: person.id) == .friends {
+                    Text(store.hasBell(person.id)
+                         ? "you'll get a ping when @\(shown.username) posts"
+                         : "pings off for @\(shown.username). tap 🔔 to turn back on")
+                        .font(PhFont.mono(12)).foregroundStyle(theme.softInk)
                 }
                 InkLine()
 
@@ -121,7 +128,7 @@ struct PersonProfileView: View {
                 HStack(spacing: 10) {
                     ForEach(boards) { b in
                         Button { selectedBoard = b.id } label: { TagChip(text: "#\(b.name)", selected: b.id == board.id) }
-                            .buttonStyle(.plain)
+                            .buttonStyle(SquishStyle())
                     }
                 }
                 .padding(1)

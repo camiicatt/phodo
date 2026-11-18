@@ -39,10 +39,10 @@ struct PhotoEditView: View {
 
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 8) {
-                    Button { draft.quarterTurns += 1 } label: { TagChip(text: "↻ rotate") }.buttonStyle(.plain)
+                    Button { draft.quarterTurns += 1 } label: { TagChip(text: "↻ rotate") }.buttonStyle(SquishStyle())
                     ForEach(EditSettings.Aspect.allCases, id: \.self) { a in
                         Button { draft.aspect = a } label: { TagChip(text: a.rawValue, selected: draft.aspect == a) }
-                            .buttonStyle(.plain)
+                            .buttonStyle(SquishStyle())
                     }
                 }
             }
@@ -50,7 +50,7 @@ struct PhotoEditView: View {
             HStack(spacing: 8) {
                 ForEach(EditSettings.Mood.allCases, id: \.self) { m in
                     Button { draft.mood = m } label: { TagChip(text: m.rawValue, selected: draft.mood == m) }
-                        .buttonStyle(.plain)
+                        .buttonStyle(SquishStyle())
                 }
                 Spacer(minLength: 0)
             }

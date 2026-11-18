@@ -72,6 +72,7 @@ final class SupabaseAccountService: AccountService {
         var theme: String
         var is_13_plus: Bool?
         var avatar_path: String?
+        var notify_requests: Bool?
     }
 
     private struct IDRow: Decodable { let id: UUID }
@@ -106,6 +107,7 @@ final class SupabaseAccountService: AccountService {
         var p = Person(id: r.id, username: r.username, displayName: r.display_name,
                        bio: r.bio, location: r.location, theme: r.theme)
         p.avatarPath = r.avatar_path
+        p.notifyRequests = r.notify_requests ?? true
         if let path = r.avatar_path {
             p.avatarURL = try? await Signer.sign(client, bucket: "avatars", paths: [path])[path]
         }

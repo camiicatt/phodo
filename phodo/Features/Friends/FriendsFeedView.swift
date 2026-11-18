@@ -6,12 +6,13 @@ struct FriendsFeedView: View {
     @Environment(\.theme) private var theme
     @AppStorage("feedMode") private var mode = 0   // 0 friends, 1 explore
     @State private var showFriends = false
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
         ScrollView {
             VStack(spacing: 18) {
                 ScreenHeader(title: mode == 0 ? "friends" : "explore",
-                             trailing: mode == 0 && !store.feed.isEmpty ? "\(store.feed.count) new" : "")
+                             trailing: mode == 0 && store.newFeedCount > 0 ? "\(store.newFeedCount) new" : "")
 
                 HStack(spacing: 10) {
                     PillToggle(options: ["friends", "explore"], selection: $mode)
@@ -31,6 +32,10 @@ struct FriendsFeedView: View {
         }
         .refreshable { await Task { await store.load() }.value }   // own task: SwiftUI cancels refresh tasks when the screen updates mid-refresh
         .phodoPage()
+        // looked at it → those posts aren't "new" anymore next time
+        .onDisappear { if mode == 0 { store.markFeedSeen() } }
+        .onChange(of: mode) { old, _ in if old == 0 { store.markFeedSeen() } }
+        .onChange(of: scenePhase) { _, phase in if phase == .background && mode == 0 { store.markFeedSeen() } }
         .sheet(isPresented: $showFriends) {
             FriendFinder().environment(\.theme, theme).presentationDetents([.large])
         }
@@ -152,6 +157,7 @@ struct FriendFinder: View {
         }
         .scrollDismissesKeyboard(.interactively)
         .phodoPage()
+        .task { await store.refreshConnections() }
         .sheet(item: $viewing) { PersonProfileView(person: $0).environment(\.theme, theme) }
     }
 
@@ -179,10 +185,10 @@ struct FriendFinder: View {
         switch store.status(of: person.id) {
         case nil:
             Button { Task { await store.addFriend(person) } } label: { TagChip(text: "add", selected: true) }
-                .buttonStyle(.plain)
+                .buttonStyle(SquishStyle())
         case .outgoing:
             Button { Task { await store.removeConnection(person.id) } } label: { TagChip(text: "requested") }
-                .buttonStyle(.plain).accessibilityHint("cancels the request")
+                .buttonStyle(SquishStyle()).accessibilityHint("cancels the request")
         case .incoming:
             HStack(spacing: 6) {
                 Button { Task { await store.accept(person.id) } } label: { TagChip(text: "accept", selected: true) }
@@ -191,9 +197,12 @@ struct FriendFinder: View {
             }
             .buttonStyle(.plain)
         case .friends:
-            Menu {
-                Button("remove friend", role: .destructive) { Task { await store.removeConnection(person.id) } }
-            } label: { TagChip(text: "friends ✓") }
+            HStack(spacing: 6) {
+                BellButton(person: person).scaleEffect(0.85)   // on by default; tap to mute their posts
+                Menu {
+                    Button("remove friend", role: .destructive) { Task { await store.removeConnection(person.id) } }
+                } label: { TagChip(text: "friends ✓") }
+            }
         }
     }
 

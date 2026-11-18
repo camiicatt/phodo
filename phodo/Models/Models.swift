@@ -58,6 +58,8 @@ struct Person: Identifiable, Hashable {
     /// Storage path in the "avatars" bucket, and a temporary link to it.
     var avatarPath: String? = nil
     var avatarURL: URL? = nil
+    /// push when someone adds me / accepts (my own profile only)
+    var notifyRequests: Bool = true
 }
 
 enum PostVisibility: String, CaseIterable {
@@ -85,6 +87,22 @@ struct Connection: Identifiable {
     var person: Person
     var status: FriendStatus
     var id: UUID { person.id }
+
+    /// One entry per person. If two requests exist between the same people
+    /// (both tapped "add" at once), the strongest wins: friends > they asked > I asked.
+    static func merged(_ list: [Connection]) -> [Connection] {
+        func rank(_ s: FriendStatus) -> Int { s == .friends ? 2 : (s == .incoming ? 1 : 0) }
+        var best: [UUID: Connection] = [:]
+        var order: [UUID] = []
+        for c in list {
+            if let current = best[c.id] {
+                if rank(c.status) > rank(current.status) { best[c.id] = c }
+            } else {
+                best[c.id] = c; order.append(c.id)
+            }
+        }
+        return order.compactMap { best[$0] }
+    }
 }
 
 struct Post: Identifiable {

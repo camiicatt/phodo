@@ -28,6 +28,15 @@ protocol SocialService {
     func unlike(_ postID: UUID) async throws
     func stats(for userID: UUID) async throws -> ProfileStats
 
+    // notifications
+    func savePushToken(_ token: String, sandbox: Bool) async throws
+    /// Friends whose "posted" pings I turned off. Everyone else I'm friends with pings by default.
+    func mutes() async throws -> Set<UUID>
+    func setMuted(_ friendID: UUID, muted: Bool) async throws
+    func setNotifyRequests(_ on: Bool) async throws
+    /// Ask the server to send a push. kind: "post" (id = post), "request" / "accept" (id = person).
+    func notify(_ kind: String, id: UUID) async
+
     // safety
     func report(post: UUID?, user: UUID, reason: String) async throws
     func block(_ id: UUID) async throws
@@ -76,10 +85,11 @@ final class SupabaseSocialService: SocialService {
         let me = try me
         let others = rows.map { $0.requester == me ? $0.a : $0.r }
         let persons = try await people(others)
-        return zip(rows, persons).map { row, person in
+        let all = zip(rows, persons).map { row, person in
             let status: FriendStatus = row.status == "accepted" ? .friends : (row.requester == me ? .outgoing : .incoming)
             return Connection(person: person, status: status)
         }
+        return Connection.merged(all)
     }
 
     func search(_ query: String) async throws -> [Person] {
@@ -189,6 +199,44 @@ final class SupabaseSocialService: SocialService {
         return ProfileStats(likes: r.likes, saves: r.saves, friends: r.friends)
     }
 
+    // MARK: notifications
+
+    func savePushToken(_ token: String, sandbox: Bool) async throws {
+        struct Row: Encodable { let token: String; let user_id: UUID; let sandbox: Bool; let updated_at: Date }
+        try await client.from("push_tokens")
+            .upsert(Row(token: token, user_id: try me, sandbox: sandbox, updated_at: Date()), onConflict: "token")
+            .execute()
+    }
+
+    func mutes() async throws -> Set<UUID> {
+        struct Row: Decodable { let friend_id: UUID }
+        let rows: [Row] = try await client.from("post_mutes").select("friend_id").execute().value
+        return Set(rows.map(\.friend_id))
+    }
+
+    func setMuted(_ friendID: UUID, muted: Bool) async throws {
+        if muted {
+            struct New: Encodable { let friend_id: UUID }
+            do { try await client.from("post_mutes").insert(New(friend_id: friendID)).execute() }
+            catch where isUniqueViolation(error) {}
+        } else {
+            try await client.from("post_mutes").delete().eq("friend_id", value: friendID.lower).execute()
+        }
+    }
+
+    func setNotifyRequests(_ on: Bool) async throws {
+        try await client.from("profiles").update(["notify_requests": on]).eq("id", value: try me.lower).execute()
+    }
+
+    func notify(_ kind: String, id: UUID) async {
+        let key = kind == "post" ? "post_id" : "to"
+        do {
+            try await client.functions.invoke("notify", options: FunctionInvokeOptions(body: ["type": kind, key: id.lower]))
+        } catch {
+            print("[phodo] notify \(kind) failed: \(error)")   // a missed push shouldn't break posting
+        }
+    }
+
     // MARK: safety
 
     func report(post: UUID?, user: UUID, reason: String) async throws {
@@ -274,6 +322,15 @@ final class MockSocialService: SocialService {
     func unsave(_ postID: UUID, from boardID: UUID) async throws {
         if let i = boardList.firstIndex(where: { $0.id == boardID }) { boardList[i].postIDs.removeAll { $0 == postID } }
     }
+
+    private var muted: Set<UUID> = []
+    func savePushToken(_ token: String, sandbox: Bool) async throws {}
+    func mutes() async throws -> Set<UUID> { muted }
+    func setMuted(_ friendID: UUID, muted on: Bool) async throws {
+        if on { muted.insert(friendID) } else { muted.remove(friendID) }
+    }
+    func setNotifyRequests(_ on: Bool) async throws {}
+    func notify(_ kind: String, id: UUID) async {}
 
     func report(post: UUID?, user: UUID, reason: String) async throws {}
     func block(_ id: UUID) async throws { conns.removeAll { $0.id == id } }

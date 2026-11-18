@@ -25,6 +25,9 @@ final class AppStore {
     var liked: Set<UUID> = []                    // posts I've ♥'d
     var likeCounts: [UUID: Int] = [:]            // ♥ from others, on MY posts only
     var myStats = ProfileStats()
+    var muted: Set<UUID> = []                    // friends whose "posted" pushes I turned off (rest are on)
+    /// When I last looked at the friends feed; only posts after this count as "new".
+    var feedSeenAt: Date = (UserDefaults.standard.object(forKey: "feedSeenAt") as? Date) ?? .distantPast
     var loadError: String?
     private var started = false
 
@@ -177,7 +180,7 @@ final class AppStore {
 
     private func reset() {
         myPosts = []; feed = []; explore = []; connections = []; boards = []; boardPosts = [:]
-        liked = []; likeCounts = [:]; myStats = ProfileStats()
+        liked = []; likeCounts = [:]; myStats = ProfileStats(); muted = []
         me = SampleData.me
         phase = .signedOut
     }
@@ -201,6 +204,10 @@ final class AppStore {
         await loadBoardPosts()
         await attempt("likes") { try await refreshLikes() }
         await attempt("stats") { myStats = try await social.stats(for: me.id) }
+        await attempt("bells") { muted = try await social.mutes() }
+        // friends' posts ping by default, so ask once you have someone to hear from
+        if !friends.isEmpty { _ = await PushDelegate.requestAndRegister() }
+        await PushDelegate.registerIfAllowed()
         loadError = problems.isEmpty ? nil : "couldn't load \(problems.joined(separator: ", ")). pull down to retry"
         print("[phodo] loaded: \(myPosts.count) posts, \(connections.count) connections, \(boards.count) boards, feed \(feed.count), explore \(explore.count)")
     }
@@ -221,6 +228,7 @@ final class AppStore {
 
     func publish(_ draft: PostDraft) async throws {
         let post = try await service.createPost(draft, by: me)
+        if post.visibility != .justMe { Task { await social.notify("post", id: post.id) } }
         myPosts.append(post)
         myPosts.sort { ($0.day, $0.createdAt) > ($1.day, $1.createdAt) }
     }
@@ -273,6 +281,14 @@ final class AppStore {
 
     // MARK: friends
 
+    /// Re-fetch friends + requests (they change on other people's phones).
+    func refreshConnections() async {
+        guard phase == .ready, let fresh = try? await social.connections() else { return }
+        let hadFriends = Set(friends.map(\.id))
+        connections = fresh
+        if Set(friends.map(\.id)) != hadFriends { try? await refreshFeeds() }
+    }
+
     func search(_ query: String) async -> [Person] {
         (try? await social.search(query)) ?? []
     }
@@ -284,11 +300,15 @@ final class AppStore {
             return
         }
         try? await social.request(person.id)
+        Task { await social.notify("request", id: person.id) }
+        // the server may have turned this into "friends" (they'd already asked me), so re-check
+        await refreshConnections()
         if status(of: person.id) == nil { connections.append(Connection(person: person, status: .outgoing)) }
     }
 
     func accept(_ id: UUID) async {
         try? await social.accept(id)
+        Task { await social.notify("accept", id: id) }
         if let i = connections.firstIndex(where: { $0.id == id }) { connections[i].status = .friends }
         try? await refreshFeeds()
     }
@@ -365,6 +385,55 @@ final class AppStore {
         loadError = "\(what) didn't work: \(error.localizedDescription.lowercased())"
     }
 
+    // MARK: notifications
+
+    /// Called with the phone's push address from Apple.
+    func savePushToken(_ token: String) async {
+        guard phase == .ready else { return }
+        #if DEBUG
+        let sandbox = true      // Xcode installs talk to Apple's sandbox push servers
+        #else
+        let sandbox = false     // TestFlight / App Store
+        #endif
+        do { try await social.savePushToken(token, sandbox: sandbox) } catch { report("turning on notifications", error) }
+    }
+
+    /// On for every friend unless I muted them from their profile.
+    func hasBell(_ id: UUID) -> Bool { status(of: id) == .friends && !muted.contains(id) }
+
+    /// 🔔 on/off for one friend (lives on their profile).
+    func toggleBell(_ id: UUID) async {
+        let on = muted.contains(id)          // currently muted → turning back on
+        if on {
+            guard await PushDelegate.requestAndRegister() else {
+                loadError = "notifications are off for phodo. turn them on in settings → phodo → notifications"
+                return
+            }
+            muted.remove(id)
+        } else {
+            muted.insert(id)
+        }
+        do { try await social.setMuted(id, muted: !on) } catch { report("changing the bell", error) }
+    }
+
+    /// Friend posts I haven't seen yet (shown as "3 new" on the friends feed).
+    var newFeedCount: Int {
+        feed.filter { $0.createdAt > feedSeenAt && $0.author.id != me.id }.count
+    }
+
+    /// Called when you leave the friends feed: everything there counts as seen.
+    func markFeedSeen() {
+        guard let newest = feed.map(\.createdAt).max(), newest > feedSeenAt else { return }
+        feedSeenAt = newest
+        UserDefaults.standard.set(newest, forKey: "feedSeenAt")
+    }
+
+    func setNotifyRequests(_ on: Bool) async {
+        me.notifyRequests = on
+        if on { _ = await PushDelegate.requestAndRegister() }
+        do { try await social.setNotifyRequests(on) } catch { report("changing notifications", error) }
+    }
+
     // MARK: preferences
 
     func setTheme(_ preset: ThemePreset) {
@@ -385,6 +454,7 @@ final class AppStore {
         defaults.set(time, forKey: "reminderTime")
         guard let time else { return }
         guard (try? await center.requestAuthorization(options: [.alert, .sound])) == true else { return }
+        await PushDelegate.registerIfAllowed()   // same permission covers friend pushes
 
         let content = UNMutableNotificationContent()
         content.title = "phodo"

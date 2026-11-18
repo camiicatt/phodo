@@ -35,6 +35,8 @@
 	<false/>
 	<key>NSCameraUsageDescription</key>
 	<string>so you can snap today's pic.</string>
+	<key>NSPhotoLibraryAddUsageDescription</key>
+	<string>so pics you take in phodo also land in your Photos.</string>
 	<key>SupabaseHost</key>
 	<string>$(SUPABASE_HOST)</string>
 	<key>SupabaseKey</key>
@@ -45,7 +47,10 @@
 		<string>DMMono-Regular.ttf</string>
 	</array>
 	<key>UILaunchScreen</key>
-	<dict/>
+	<dict>
+		<key>UIColorName</key>
+		<string>LaunchBg</string>
+	</dict>
 	<key>UISupportedInterfaceOrientations</key>
 	<array>
 		<string>UIInterfaceOrientationPortrait</string>

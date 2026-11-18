@@ -5,14 +5,16 @@ import CoreImage.CIFilterBuiltins
 // Builds the phodo app icon from a hand-drawn sketch (black lines on white):
 // white → lavender (see-through), black → phodo ink, lines slightly thickened,
 // cropped to the drawing and centered.
-// Usage: swift tools/icon-from-sketch.swift tools/art/cat-sketch.png out.png [thicken]
+// Usage: swift tools/icon-from-sketch.swift tools/art/cat-sketch.png out.png [thicken] [mask]
+//   mask → just the lines on a transparent background (in-app art the theme can tint)
 
 let args = CommandLine.arguments
 let input = URL(fileURLWithPath: args[1])
 let output = URL(fileURLWithPath: args[2])
 let thicken = args.count > 3 ? Double(args[3])! : 2.5
 
-let size = 1024
+let mask = args.count > 4 && args[4] == "mask"
+let size = mask ? 600 : 1024
 let lavender = (r: 0xDC, g: 0xD5, b: 0xF5)
 let ink = (r: 0x1C, g: 0x1A, b: 0x27)
 
@@ -60,10 +62,11 @@ for i in 0..<(w * h) {
 
 // 3. place the cropped drawing centered, ~80% of the icon wide
 let cropW = maxX - minX + 1, cropH = maxY - minY + 1
-let fit = min(0.80 * Double(size) / Double(cropW), 0.66 * Double(size) / Double(cropH))
+let fit = mask ? min(0.98 * Double(size) / Double(cropW), 0.98 * Double(size) / Double(cropH))
+              : min(0.80 * Double(size) / Double(cropW), 0.66 * Double(size) / Double(cropH))
 let drawW = Double(cropW) * fit, drawH = Double(cropH) * fit
 let originX = (Double(size) - drawW) / 2
-let originY = (Double(size) - drawH) / 2 + Double(size) * 0.02   // sit a hair low, like it's resting
+let originY = (Double(size) - drawH) / 2 + (mask ? 0 : Double(size) * 0.02)   // icon: sit a hair low, like it's resting
 
 var out = [UInt8](repeating: 255, count: size * size * 4)
 for y in 0..<size {
@@ -79,6 +82,10 @@ for y in 0..<size {
             a = (a00 * (1 - fx) + a10 * fx) * (1 - fy) + (a01 * (1 - fx) + a11 * fx) * fy
         }
         let o = (y * size + x) * 4
+        if mask {   // premultiplied black lines, transparent elsewhere
+            out[o] = 0; out[o + 1] = 0; out[o + 2] = 0; out[o + 3] = UInt8(a * 255)
+            continue
+        }
         out[o]     = UInt8(Double(lavender.r) * (1 - a) + Double(ink.r) * a)
         out[o + 1] = UInt8(Double(lavender.g) * (1 - a) + Double(ink.g) * a)
         out[o + 2] = UInt8(Double(lavender.b) * (1 - a) + Double(ink.b) * a)
@@ -89,7 +96,7 @@ for y in 0..<size {
 let provider = CGDataProvider(data: Data(out) as CFData)!
 let cg = CGImage(width: size, height: size, bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: size * 4,
                  space: CGColorSpace(name: CGColorSpace.sRGB)!,
-                 bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.noneSkipLast.rawValue),
+                 bitmapInfo: CGBitmapInfo(rawValue: (mask ? CGImageAlphaInfo.premultipliedLast : CGImageAlphaInfo.noneSkipLast).rawValue),
                  provider: provider, decode: nil, shouldInterpolate: true, intent: .defaultIntent)!
 let rep = NSBitmapImageRep(cgImage: cg)
 try! rep.representation(using: .png, properties: [:])!.write(to: output)

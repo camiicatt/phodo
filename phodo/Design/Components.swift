@@ -48,7 +48,8 @@ struct PrimaryButtonStyle: ButtonStyle {
             .foregroundStyle(theme.bg)
             .frame(maxWidth: .infinity, minHeight: 52)
             .background(Capsule().fill(theme.ink.opacity(isEnabled ? 1 : 0.35)))
-            .scaleEffect(configuration.isPressed ? 0.97 : 1)
+            .scaleEffect(configuration.isPressed ? 0.96 : 1)
+            .animation(Motion.press, value: configuration.isPressed)
     }
 }
 
@@ -62,6 +63,17 @@ struct OutlineButtonStyle: ButtonStyle {
             .frame(maxWidth: .infinity, minHeight: 46)
             .background(Capsule().fill(configuration.isPressed ? theme.chip : theme.card))
             .overlay(Capsule().stroke(theme.ink, lineWidth: Metrics.line))
+            .scaleEffect(configuration.isPressed ? 0.96 : 1)
+            .animation(Motion.press, value: configuration.isPressed)
+    }
+}
+
+/// Plain button that squishes a little while held and springs back.
+struct SquishStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .scaleEffect(configuration.isPressed ? 0.92 : 1)
+            .animation(Motion.press, value: configuration.isPressed)
     }
 }
 
@@ -90,26 +102,33 @@ struct PillToggle: View {
     @Environment(\.theme) private var theme
     let options: [String]
     @Binding var selection: Int
+    @Namespace private var knob
+    @State private var taps = 0
 
     var body: some View {
         HStack(spacing: 0) {
             ForEach(options.indices, id: \.self) { i in
-                Button { withAnimation(.snappy) { selection = i } } label: {
+                let on = selection == i
+                Button { taps += 1; withAnimation(Motion.slide) { selection = i } } label: {
                     Text(options[i])
                         .font(PhFont.mono(15))
-                        .foregroundStyle(selection == i ? theme.bg : theme.ink)
+                        .foregroundStyle(on ? theme.bg : theme.ink)
                         .lineLimit(1)
                         .fixedSize()
                         .padding(.horizontal, 16).frame(minHeight: 42)
-                        .background(Capsule().fill(selection == i ? theme.ink : .clear))
+                        .background {
+                            if on { Capsule().fill(theme.ink).matchedGeometryEffect(id: "knob", in: knob) }
+                        }
+                        .contentShape(Capsule())
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(SquishStyle())
             }
         }
         .padding(4)
         .background(Capsule().fill(theme.chip))
         .overlay(Capsule().stroke(theme.ink, lineWidth: Metrics.line))
         .fixedSize()
+        .sensoryFeedback(.selection, trigger: taps)
     }
 }
 
@@ -145,6 +164,30 @@ struct PhotoTile: View {
             .clipShape(RoundedRectangle(cornerRadius: Metrics.radius, style: .continuous))
             .overlay(RoundedRectangle(cornerRadius: Metrics.radius, style: .continuous)
                 .stroke(theme.ink, lineWidth: Metrics.line))
+    }
+}
+
+/// 🔔 "tell me when they post". Filled when on.
+struct BellButton: View {
+    @Environment(AppStore.self) private var store
+    @Environment(\.theme) private var theme
+    let person: Person
+    @State private var taps = 0
+
+    var body: some View {
+        let on = store.hasBell(person.id)
+        Button { taps += 1; Task { await store.toggleBell(person.id) } } label: {
+            Image(systemName: on ? "bell.fill" : "bell")
+                .font(.system(size: 17, weight: .light))
+                .foregroundStyle(theme.ink)
+                .frame(width: 44, height: 44)
+                .background(Circle().fill(on ? theme.chip : .clear))
+                .overlay(Circle().stroke(theme.ink, lineWidth: Metrics.line))
+        }
+        .buttonStyle(.plain)
+        .sensoryFeedback(.selection, trigger: taps)
+        .accessibilityLabel(on ? "stop notifying me when @\(person.username) posts"
+                               : "notify me when @\(person.username) posts")
     }
 }
 

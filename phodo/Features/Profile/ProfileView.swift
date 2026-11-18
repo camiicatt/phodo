@@ -223,6 +223,8 @@ struct SettingsSheet: View {
     @Environment(\.theme) private var theme
     @Environment(\.dismiss) private var dismiss
 
+    @AppStorage(PhotoSaver.settingKey) private var saveShots = true
+
     var body: some View {
         ScrollView {
         VStack(alignment: .leading, spacing: 22) {
@@ -231,6 +233,16 @@ struct SettingsSheet: View {
             ColorPresetPicker()
             FieldLabel("daily nudge")
             ReminderPicker()
+            FieldLabel("notifications")
+            Toggle(isOn: Binding(get: { store.me.notifyRequests },
+                                 set: { on in Task { await store.setNotifyRequests(on) } })) {
+                Text("when someone adds me").font(PhFont.body(18))
+            }
+            Text("friends' posts ping you. tap 🔔 on someone to mute them").font(PhFont.mono(12)).foregroundStyle(theme.softInk)
+            FieldLabel("camera")
+            Toggle(isOn: $saveShots) {
+                Text("save pics I take to my phone").font(PhFont.body(18))
+            }
             InkLine()
             Button("sign out") { dismiss(); Task { await store.signOut() } }
                 .font(PhFont.mono(15))
