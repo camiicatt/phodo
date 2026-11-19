@@ -12,12 +12,8 @@ struct ProfileView: View {
     @Environment(AppStore.self) private var store
     @Environment(\.theme) private var theme
     @State private var mode = 0              // 0 pics, 1 journal
-    @State private var showEdit = false
     @State private var showSettings = false
     @State private var openDay: OpenDay?
-    @State private var avatarItem: PhotosPickerItem?
-    @State private var uploadingAvatar = false
-    @State private var avatarError: String?
 
     var body: some View {
         ScrollView {
@@ -25,12 +21,7 @@ struct ProfileView: View {
                 header
                 if !store.me.bio.isEmpty { Text(store.me.bio).font(PhFont.body(19)) }
                 StatsRow(stats: store.myStats)
-                if let avatarError { Text(avatarError).font(PhFont.mono(13)) }
-
-                HStack(spacing: 12) {
-                    Button("edit profile") { showEdit = true }.buttonStyle(OutlineButtonStyle())
-                    PillToggle(options: ["pics", "journal"], selection: $mode)
-                }
+                PillToggle(options: ["pics", "journal"], selection: $mode)
                 InkLine()
 
                 if store.myPosts.isEmpty {
@@ -50,8 +41,6 @@ struct ProfileView: View {
         }
         .refreshable { await Task { await store.load() }.value }   // own task: SwiftUI cancels refresh tasks when the screen updates mid-refresh
         .phodoPage()
-        .onChange(of: avatarItem) { _, item in Task { await setAvatar(item) } }
-        .sheet(isPresented: $showEdit) { EditProfileSheet().environment(\.theme, theme) }
         .sheet(isPresented: $showSettings) { SettingsSheet().environment(\.theme, theme) }
         .sheet(item: $openDay) { open in
             DaySheet(day: open.day).environment(\.theme, theme).presentationDetents([.large])
@@ -60,18 +49,7 @@ struct ProfileView: View {
 
     private var header: some View {
         HStack(alignment: .center, spacing: 16) {
-            PhotosPicker(selection: $avatarItem, matching: .images) {
-                Avatar(person: store.me, size: 76)
-                    .overlay(alignment: .bottomTrailing) {
-                        Image(systemName: uploadingAvatar ? "hourglass" : "camera.fill")
-                            .font(.system(size: 11)).foregroundStyle(theme.bg)
-                            .frame(width: 24, height: 24)
-                            .background(Circle().fill(theme.ink))
-                    }
-            }
-            .buttonStyle(.plain)
-            .disabled(uploadingAvatar)
-            .accessibilityLabel("change profile picture")
+            Avatar(person: store.me, size: 76)
 
             VStack(alignment: .leading, spacing: 2) {
                 Text("@\(store.me.username)").font(PhFont.title(30)).lineLimit(1).minimumScaleFactor(0.6)
@@ -87,24 +65,6 @@ struct ProfileView: View {
             }
             .buttonStyle(.plain)
             .accessibilityLabel("settings")
-        }
-    }
-
-    /// Picked photo → center square → 512px JPEG (no metadata) → upload.
-    private func setAvatar(_ item: PhotosPickerItem?) async {
-        guard let item, let data = try? await item.loadTransferable(type: Data.self),
-              let base = PhotoProcessor.downsample(data, maxPixel: 1024) else { return }
-        var square = EditSettings()
-        square.aspect = .square
-        let cropped = PhotoProcessor.resize(PhotoEditor.render(base, square), maxPixel: 512)
-        guard let jpeg = PhotoProcessor.encodeJPEG(cropped, quality: 0.85) else { return }
-        uploadingAvatar = true
-        defer { uploadingAvatar = false; avatarItem = nil }
-        do {
-            try await store.setAvatar(jpeg)
-            avatarError = nil
-        } catch {
-            avatarError = "couldn't save that pic, try again"
         }
     }
 }
@@ -125,6 +85,7 @@ struct DaySheet: View {
             .padding(.top, 24).padding(.bottom, 24)
         }
         .phodoPage()
+        .holdMenuHost()
     }
 }
 
@@ -188,10 +149,41 @@ struct EditProfileSheet: View {
     @State private var name = ""
     @State private var bio = ""
     @State private var location = ""
+    @State private var avatarItem: PhotosPickerItem?
+    @State private var uploadingAvatar = false
+    @State private var avatarError: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
-            Text("edit profile").font(PhFont.title(34))
+            HStack {
+                Text("edit profile").font(PhFont.title(34))
+                Spacer()
+                Button("cancel") { dismiss() }.font(PhFont.mono(15))
+            }
+
+            // profile pic
+            PhotosPicker(selection: $avatarItem, matching: .images) {
+                HStack(spacing: 16) {
+                    Avatar(person: store.me, size: 76)
+                        .overlay(alignment: .bottomTrailing) {
+                            Image(systemName: uploadingAvatar ? "hourglass" : "camera")
+                                .font(.system(size: 11, weight: .medium)).foregroundStyle(theme.bg)
+                                .frame(width: 24, height: 24)
+                                .background(Circle().fill(theme.ink))
+                        }
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(uploadingAvatar ? "saving…" : "change profile pic").font(PhFont.bold(17))
+                        Text("it gets cropped to a square").font(PhFont.mono(12)).foregroundStyle(theme.softInk)
+                    }
+                    Spacer(minLength: 0)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .disabled(uploadingAvatar)
+            .accessibilityLabel("change profile picture")
+            if let avatarError { Text(avatarError).font(PhFont.mono(13)) }
+
             field("name", $name)
             field("bio", $bio)
             field("where", $location)
@@ -207,6 +199,25 @@ struct EditProfileSheet: View {
         .padding(.top, 28)
         .phodoPage()
         .onAppear { name = store.me.displayName; bio = store.me.bio; location = store.me.location }
+        .onChange(of: avatarItem) { _, item in Task { await setAvatar(item) } }
+    }
+
+    /// Picked photo → center square → 512px JPEG (no metadata) → upload.
+    private func setAvatar(_ item: PhotosPickerItem?) async {
+        guard let item, let data = try? await item.loadTransferable(type: Data.self),
+              let base = PhotoProcessor.downsample(data, maxPixel: 1024) else { return }
+        var square = EditSettings()
+        square.aspect = .square
+        let cropped = PhotoProcessor.resize(PhotoEditor.render(base, square), maxPixel: 512)
+        guard let jpeg = PhotoProcessor.encodeJPEG(cropped, quality: 0.85) else { return }
+        uploadingAvatar = true
+        defer { uploadingAvatar = false; avatarItem = nil }
+        do {
+            try await store.setAvatar(jpeg)
+            avatarError = nil
+        } catch {
+            avatarError = "couldn't save that pic, try again"
+        }
     }
 
     private func field(_ label: String, _ text: Binding<String>) -> some View {
@@ -222,13 +233,39 @@ struct SettingsSheet: View {
     @Environment(AppStore.self) private var store
     @Environment(\.theme) private var theme
     @Environment(\.dismiss) private var dismiss
+    @State private var editing = false
 
     @AppStorage(PhotoSaver.settingKey) private var saveShots = true
 
     var body: some View {
         ScrollView {
         VStack(alignment: .leading, spacing: 22) {
-            Text("settings").font(PhFont.title(34))
+            HStack {
+                Text("settings").font(PhFont.title(34))
+                Spacer()
+                Button("done") { dismiss() }.font(PhFont.bold(17))
+            }
+
+            FieldLabel("profile")
+            Button { editing = true } label: {
+                HStack(spacing: 14) {
+                    Avatar(person: store.me, size: 52)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("edit profile").font(PhFont.bold(18))
+                        Text("pic, name, bio, where").font(PhFont.mono(12)).foregroundStyle(theme.softInk)
+                    }
+                    Spacer(minLength: 0)
+                    Image(systemName: "chevron.right").font(.system(size: 14, weight: .light))
+                        .foregroundStyle(theme.softInk)
+                }
+                .padding(12)
+                .background(RoundedRectangle(cornerRadius: Metrics.radius, style: .continuous).fill(theme.card))
+                .overlay(RoundedRectangle(cornerRadius: Metrics.radius, style: .continuous)
+                    .stroke(theme.ink, lineWidth: Metrics.line))
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(SquishStyle())
+
             FieldLabel("your color")
             ColorPresetPicker()
             FieldLabel("daily nudge")
@@ -260,6 +297,7 @@ struct SettingsSheet: View {
         .padding(.top, 28).padding(.bottom, 24)
         }
         .phodoPage()
+        .sheet(isPresented: $editing) { EditProfileSheet().environment(\.theme, theme) }
         .confirmationDialog("delete your account?", isPresented: $confirmDelete, titleVisibility: .visible) {
             Button("delete everything", role: .destructive) {
                 Task {
@@ -268,7 +306,7 @@ struct SettingsSheet: View {
                 }
             }
         } message: {
-            Text("all your posts, photos, friends and boards are deleted for good. this can't be undone.")
+            Text("all your posts, photos, friends and scrapbooks are deleted for good. this can't be undone.")
         }
     }
 

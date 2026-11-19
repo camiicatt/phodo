@@ -24,8 +24,12 @@ protocol PostService {
     func posts(ids: [UUID]) async throws -> [Post]
     /// Someone's posts that I'm allowed to see.
     func posts(by userID: UUID) async throws -> [Post]
+    /// Posts with this #tag that I'm allowed to see (mine, friends', and "everyone" ones), newest first.
+    func posts(tagged tag: String) async throws -> [Post]
     func createPost(_ draft: PostDraft, by me: Person) async throws -> Post
     func deletePost(_ id: UUID) async throws
+    /// Change who sees a post after it's up (friends / everyone / just me).
+    func setVisibility(_ id: UUID, to visibility: PostVisibility) async throws
 }
 
 extension PostDraft {
@@ -39,8 +43,10 @@ extension PostDraft {
 @MainActor
 final class MockPostService: PostService {
     private var all: [Post]
+    private let me: Person
 
     init(me: Person, seed: Bool = true) {
+        self.me = me
         all = seed ? SampleData.friendPosts() + SampleData.myPosts(me) + SampleData.explorePosts() : []
     }
 
@@ -66,6 +72,11 @@ final class MockPostService: PostService {
             .sorted { ($0.day, $0.createdAt) > ($1.day, $1.createdAt) }
     }
 
+    func posts(tagged tag: String) async throws -> [Post] {
+        all.filter { $0.tags.contains(tag) && ($0.visibility != .justMe || $0.author.id == me.id) }
+            .sorted { $0.createdAt > $1.createdAt }
+    }
+
     func createPost(_ draft: PostDraft, by me: Person) async throws -> Post {
         try draft.validate()
         try await Task.sleep(for: .milliseconds(500))   // pretend upload
@@ -80,5 +91,9 @@ final class MockPostService: PostService {
 
     func deletePost(_ id: UUID) async throws {
         all.removeAll { $0.id == id }
+    }
+
+    func setVisibility(_ id: UUID, to visibility: PostVisibility) async throws {
+        if let i = all.firstIndex(where: { $0.id == id }) { all[i].visibility = visibility }
     }
 }

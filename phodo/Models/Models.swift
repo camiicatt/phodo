@@ -155,3 +155,19 @@ struct PostDraft {
 
     var isEmpty: Bool { photo == nil && caption.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
 }
+
+/// A tiny comment ("so cute"). 30 characters max — see `CommentRules`.
+struct Comment: Identifiable, Hashable {
+    let id: UUID
+    let postID: UUID
+    let author: Person
+    var text: String
+    var createdAt: Date = Date()
+}
+
+/// Someone you might know: a friend of your friends.
+struct Suggestion: Identifiable {
+    var person: Person
+    var mutual: Int
+    var id: UUID { person.id }
+}

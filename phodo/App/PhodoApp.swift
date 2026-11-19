@@ -58,6 +58,9 @@ struct ThemedRoot: View {
 
 enum Tab: String, CaseIterable {
     case explore, today, profile, boards   // explore holds the friends / everyone toggle
+
+    /// What the tab bar says. "boards" are called scrapbooks in the app.
+    var label: String { self == .boards ? "scrapbooks" : rawValue }
 }
 
 struct RootTabView: View {
@@ -93,6 +96,7 @@ struct RootTabView: View {
         }
         .ignoresSafeArea(.keyboard, edges: .bottom)   // keyboard covers the tab bar instead of pushing it up
         .background(theme.bg.ignoresSafeArea())
+        .holdMenuHost()                               // hold a post → save / love / see bubbles
     }
 
     private func select(_ new: Tab) {
@@ -145,7 +149,7 @@ struct TextTabBar: View {
                 ForEach(Tab.allCases, id: \.self) { tab in
                     let on = selection == tab
                     Button { taps += 1; selection = tab } label: {
-                        Text(tab.rawValue)
+                        Text(tab.label)
                             .font(on ? PhFont.bold(19) : PhFont.body(19))
                             .foregroundStyle(on ? theme.ink : theme.softInk)
                             .lineLimit(1).fixedSize()

@@ -4,6 +4,7 @@
 //   { "type": "post",    "post_id": "<uuid>" }   → all the poster's friends (minus muted)
 //   { "type": "request", "to": "<uuid>" }        → "@you wants to be friends"
 //   { "type": "accept",  "to": "<uuid>" }        → "@you accepted your request"
+//   { "type": "comment", "comment_id": "<uuid>" } → the post's owner: "@you: so cute"
 //
 // The caller must be signed in (JWT verified by Supabase). Everything is
 // re-checked here with the database, so the app can't spam anyone.
@@ -137,6 +138,23 @@ Deno.serve(async (req) => {
       title: accepted ? `${name} is your friend now` : `${name} wants to be friends`,
       body: accepted ? "go see their day ✌︎" : "open phodo to say yes",
       data: { kind: "friend", from: user.id },
+    });
+    return json({ sent });
+  }
+
+  // someone commented → the post's owner
+  if (body.type === "comment" && body.comment_id) {
+    const { data: c } = await admin.from("comments").select("id, user_id, body, post_id, posts(user_id)")
+      .eq("id", body.comment_id).single();
+    // deno-lint-ignore no-explicit-any
+    const owner = (c?.posts as any)?.user_id as string | undefined;
+    if (!c || c.user_id !== user.id || !owner || owner === user.id) return json({ sent: 0 });
+    const { data: blocked } = await admin.rpc("is_blocked", { a: owner, b: user.id });
+    if (blocked) return json({ sent: 0 });
+    const sent = await pushTo([owner], {
+      title: `${name} commented`,
+      body: c.body,
+      data: { kind: "comment", post_id: c.post_id },
     });
     return json({ sent });
   }

@@ -51,6 +51,9 @@ struct ThemePreset: Identifiable, Hashable {
 ///   softInk             → secondary text (#4A4560)
 ///   ink       darkest   → text, 1px lines, primary buttons (#1C1A27)
 ///
+///   shade               → background of the "your people" and search sheets: a deeper
+///                         tone of the page (deeper + richer in dark themes) so they feel
+///                         like their own place
 ///   frame               → the mat around a full-screen photo: a deeper shade of the
 ///                         same hue (lighter in dark themes) so the picture stands out
 struct Theme {
@@ -59,13 +62,21 @@ struct Theme {
 
     let card: Color
     let chip: Color
-    let bg: Color
+    private(set) var bg: Color
     let sunken: Color
     let photoTint: Color
     let accent: Color
     let softInk: Color
     let ink: Color
     let frame: Color
+    let shade: Color
+
+    /// Same theme, but the page background is `shade` (for sheets that should stand apart).
+    var shaded: Theme {
+        var t = self
+        t.bg = shade
+        return t
+    }
 
     init(preset: ThemePreset) {
         self.preset = preset
@@ -77,6 +88,7 @@ struct Theme {
         card = c(s.card); chip = c(s.chip); bg = c(s.bg); sunken = c(s.sunken)
         photoTint = c(s.photoTint); accent = c(s.accent); softInk = c(s.softInk); ink = c(s.ink)
         frame = preset.dark ? c((0.32, 0.50)) : c((0.40, 0.72))
+        shade = preset.dark ? c((0.42, 0.19)) : c((0.22, 0.915))
     }
 
     /// (saturation, brightness) for each token. Light values were measured from the

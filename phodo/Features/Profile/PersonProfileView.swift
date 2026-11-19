@@ -66,7 +66,7 @@ struct PersonProfileView: View {
                 HStack(spacing: 12) {
                     friendButton
                     if store.status(of: person.id) == .friends { BellButton(person: shown) }
-                    PillToggle(options: ["pics", "boards"], selection: $mode)
+                    PillToggle(options: ["pics", "scrapbooks"], selection: $mode)
                 }
                 if store.status(of: person.id) == .friends {
                     Text(store.hasBell(person.id)
@@ -97,6 +97,7 @@ struct PersonProfileView: View {
             .padding(.top, 20).padding(.bottom, 24)
         }
         .phodoPage()
+        .holdMenuHost()
         .task { await load() }
     }
 
@@ -120,7 +121,7 @@ struct PersonProfileView: View {
     @ViewBuilder
     private var boardsSection: some View {
         if boards.isEmpty {
-            Text("no public boards").font(PhFont.mono(14)).foregroundStyle(theme.softInk)
+            Text("no public scrapbooks").font(PhFont.mono(14)).foregroundStyle(theme.softInk)
         } else {
             let board = boards.first { $0.id == selectedBoard } ?? boards[0]
             let items = board.postIDs.compactMap { boardPosts[$0] }

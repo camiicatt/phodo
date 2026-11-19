@@ -2,23 +2,70 @@ import SwiftUI
 
 // Small reusable pieces from "the vibe" style sheet.
 
-struct ScreenHeader: View {
+struct ScreenHeader<Accessory: View>: View {
     @Environment(\.theme) private var theme
     let title: String
     var trailing: String = ""
+    /// Optional button at the far right (e.g. add friends).
+    @ViewBuilder var accessory: () -> Accessory
+
+    init(title: String, trailing: String = "", @ViewBuilder accessory: @escaping () -> Accessory) {
+        self.title = title; self.trailing = trailing; self.accessory = accessory
+    }
 
     var body: some View {
         VStack(spacing: 14) {
-            HStack(alignment: .lastTextBaseline) {
-                // never break the title mid-word ("toda / y"); shrink instead
-                Text(title).font(PhFont.title(52)).foregroundStyle(theme.ink)
-                    .lineLimit(1).minimumScaleFactor(0.5).layoutPriority(1)
-                Spacer(minLength: 8)
-                Text(trailing).font(PhFont.mono(14)).foregroundStyle(theme.softInk)
-                    .lineLimit(1)
+            HStack(spacing: 12) {
+                HStack(alignment: .lastTextBaseline) {
+                    // never break the title mid-word ("toda / y"); shrink instead
+                    Text(title).font(PhFont.title(52)).foregroundStyle(theme.ink)
+                        .lineLimit(1).minimumScaleFactor(0.5).layoutPriority(1)
+                    Spacer(minLength: 8)
+                    Text(trailing).font(PhFont.mono(14)).foregroundStyle(theme.softInk)
+                        .lineLimit(1)
+                }
+                accessory()
             }
             InkLine()
         }
+    }
+}
+
+extension ScreenHeader where Accessory == EmptyView {
+    init(title: String, trailing: String = "") {
+        self.init(title: title, trailing: trailing) { EmptyView() }
+    }
+}
+
+/// Round thin-outlined icon button, with an optional little number badge.
+struct IconButton: View {
+    @Environment(\.theme) private var theme
+    let symbol: String
+    var badge = 0
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .font(.system(size: 18, weight: .light))
+                .foregroundStyle(theme.ink)
+                .frame(width: 44, height: 44)
+                .background(Circle().fill(theme.card))
+                .overlay(Circle().stroke(theme.ink, lineWidth: Metrics.line))
+                .overlay(alignment: .topTrailing) {
+                    if badge > 0 {
+                        Text(badge > 9 ? "9+" : "\(badge)")
+                            .font(PhFont.bold(12)).foregroundStyle(theme.bg)
+                            .padding(.horizontal, 5)
+                            .frame(minWidth: 20, minHeight: 20)
+                            .background(Capsule().fill(theme.ink))
+                            .offset(x: 0, y: 0)   // stays inside the button so the scroll edge never cuts it off
+                            .transition(.scale.combined(with: .opacity))
+                    }
+                }
+                .animation(.spring(response: 0.3, dampingFraction: 0.6), value: badge)
+        }
+        .buttonStyle(SquishStyle())
     }
 }
 
@@ -155,10 +202,8 @@ struct PhotoTile: View {
                 if let image {
                     Image(uiImage: image).resizable().scaledToFill()
                 } else if let url {
-                    // TODO: swap for Nuke with a cache keyed by storage path (signed URLs change).
-                    AsyncImage(url: url) { phase in
-                        phase.image?.resizable().scaledToFill()
-                    }
+                    // cached on the phone by photo, so it's instant after the first time
+                    CachedImage(url: url)
                 }
             }
             .clipShape(RoundedRectangle(cornerRadius: Metrics.radius, style: .continuous))
@@ -202,9 +247,7 @@ struct Avatar: View {
             .frame(width: size, height: size)
             .overlay {
                 if let url = person.avatarURL {
-                    AsyncImage(url: url) { phase in
-                        if let image = phase.image { image.resizable().scaledToFill() } else { initial }
-                    }
+                    CachedImage(url: url) { initial }
                 } else {
                     initial
                 }

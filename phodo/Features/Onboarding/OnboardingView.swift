@@ -119,6 +119,9 @@ struct OnboardingView: View {
             Text("daily\nnudge?").font(PhFont.title(48))
             Text("one gentle reminder. no streak guilt.").font(PhFont.mono(14)).foregroundStyle(theme.softInk)
             ReminderPicker()
+            Text("next, phodo will ask to send notifications. say allow so you know when someone adds you or a friend posts.")
+                .font(PhFont.mono(13)).foregroundStyle(theme.softInk)
+                .padding(.top, 8)
         }
     }
 

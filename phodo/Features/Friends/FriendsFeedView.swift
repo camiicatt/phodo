@@ -6,23 +6,23 @@ struct FriendsFeedView: View {
     @Environment(\.theme) private var theme
     @AppStorage("feedMode") private var mode = 0   // 0 friends, 1 explore
     @State private var showFriends = false
+    @State private var showSearch = false
     @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
         ScrollView {
             VStack(spacing: 18) {
                 ScreenHeader(title: mode == 0 ? "friends" : "explore",
-                             trailing: mode == 0 && store.newFeedCount > 0 ? "\(store.newFeedCount) new" : "")
+                             trailing: mode == 0 && store.newFeedCount > 0 ? "\(store.newFeedCount) new" : "") {
+                    IconButton(symbol: "person.badge.plus", badge: store.incoming.count) { showFriends = true }
+                        .accessibilityLabel(store.incoming.isEmpty ? "add friends" : "add friends, \(store.incoming.count) requests")
+                }
 
                 HStack(spacing: 10) {
                     PillToggle(options: ["friends", "explore"], selection: $mode)
                     Spacer(minLength: 0)
-                    Button { showFriends = true } label: {
-                        TagChip(text: store.incoming.isEmpty ? "+ add" : "\(store.incoming.count) new ✦",
-                                selected: !store.incoming.isEmpty)
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel(store.incoming.isEmpty ? "find friends" : "\(store.incoming.count) friend requests")
+                    IconButton(symbol: "magnifyingglass") { showSearch = true }
+                        .accessibilityLabel("search tags and people")
                 }
 
                 if mode == 0 { friendsFeed } else { exploreFeed }
@@ -37,7 +37,12 @@ struct FriendsFeedView: View {
         .onChange(of: mode) { old, _ in if old == 0 { store.markFeedSeen() } }
         .onChange(of: scenePhase) { _, phase in if phase == .background && mode == 0 { store.markFeedSeen() } }
         .sheet(isPresented: $showFriends) {
-            FriendFinder().environment(\.theme, theme).presentationDetents([.large])
+            FriendFinder().environment(\.theme, theme.shaded).presentationDetents([.large])
+                .presentationBackground(theme.shade)
+        }
+        .sheet(isPresented: $showSearch) {
+            SearchSheet().environment(\.theme, theme.shaded).presentationDetents([.large])
+                .presentationBackground(theme.shade)
         }
     }
 
@@ -99,6 +104,7 @@ struct FriendFinder: View {
     @State private var results: [Person] = []
     @State private var searching = false
     @State private var viewing: Person?
+    @State private var suggested: [Suggestion] = []
 
     var body: some View {
         ScrollView {
@@ -132,6 +138,14 @@ struct FriendFinder: View {
                     ForEach(store.incoming) { c in row(c.person) }
                 }
 
+                // still shown after you tap "add" (the button turns into "requested")
+                if query.isEmpty && !suggested.isEmpty {
+                    FieldLabel("people you may know")
+                    ForEach(suggested) { s in
+                        row(s.person, note: s.mutual == 1 ? "1 mutual friend" : "\(s.mutual) mutual friends")
+                    }
+                }
+
                 FieldLabel("friends · \(store.friends.count)")
                 if store.friends.isEmpty {
                     Text("no friends yet. search above or send an invite")
@@ -144,7 +158,15 @@ struct FriendFinder: View {
                     FieldLabel("waiting on them")
                     ForEach(waiting) { c in row(c.person) }
                 }
-
+            }
+            .foregroundStyle(theme.ink)
+            .padding(.top, 24).padding(.bottom, 24)
+        }
+        .scrollDismissesKeyboard(.interactively)
+        .phodoPage()
+        // always there at the bottom while the list scrolls under it
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            VStack(spacing: 12) {
                 InkLine()
                 ShareLink(item: URL(string: "https://phodo.app")!,
                           message: Text("add me on phodo, i'm @\(store.me.username) 🐈 one pic a day, just for your people")) {
@@ -152,23 +174,50 @@ struct FriendFinder: View {
                 }
                 .buttonStyle(OutlineButtonStyle())
             }
-            .foregroundStyle(theme.ink)
-            .padding(.top, 24).padding(.bottom, 24)
+            .padding(.horizontal, Metrics.margin)
+            .padding(.bottom, 8)
+            .background(theme.bg.ignoresSafeArea())
         }
-        .scrollDismissesKeyboard(.interactively)
-        .phodoPage()
-        .task { await store.refreshConnections() }
+        .task {
+            await store.refreshConnections()
+            suggested = await store.suggestions()
+        }
         .sheet(item: $viewing) { PersonProfileView(person: $0).environment(\.theme, theme) }
     }
 
-    private func row(_ person: Person) -> some View {
+    private func row(_ person: Person, note: String? = nil) -> some View {
+        PersonRow(person: person, note: note) { viewing = $0 }
+    }
+
+    private func runSearch() async {
+        let q = Username.clean(query)
+        guard !q.isEmpty else { results = []; return }
+        try? await Task.sleep(for: .milliseconds(300))   // wait until they stop typing
+        guard !Task.isCancelled else { return }
+        searching = true
+        results = await store.search(q)
+        searching = false
+    }
+}
+
+/// @name + their add / requested / accept / friends button. Tap the name for their profile.
+struct PersonRow: View {
+    @Environment(AppStore.self) private var store
+    @Environment(\.theme) private var theme
+    let person: Person
+    var note: String? = nil
+    let open: (Person) -> Void
+
+    var body: some View {
         HStack(spacing: 12) {
-            Button { viewing = person } label: {
+            Button { open(person) } label: {
                 HStack(spacing: 12) {
                     Avatar(person: person, size: 44)
                     VStack(alignment: .leading, spacing: 2) {
                         Text("@\(person.username)").font(PhFont.bold(17))
-                        if !person.displayName.isEmpty && person.displayName != person.username {
+                        if let note {
+                            Text(note).font(PhFont.mono(13)).foregroundStyle(theme.softInk)
+                        } else if !person.displayName.isEmpty && person.displayName != person.username {
                             Text(person.displayName).font(PhFont.mono(13)).foregroundStyle(theme.softInk)
                         }
                     }
@@ -176,12 +225,12 @@ struct FriendFinder: View {
             }
             .buttonStyle(.plain)
             Spacer()
-            action(for: person)
+            action
         }
     }
 
     @ViewBuilder
-    private func action(for person: Person) -> some View {
+    private var action: some View {
         switch store.status(of: person.id) {
         case nil:
             Button { Task { await store.addFriend(person) } } label: { TagChip(text: "add", selected: true) }
@@ -204,15 +253,5 @@ struct FriendFinder: View {
                 } label: { TagChip(text: "friends ✓") }
             }
         }
-    }
-
-    private func runSearch() async {
-        let q = Username.clean(query)
-        guard !q.isEmpty else { results = []; return }
-        try? await Task.sleep(for: .milliseconds(300))   // wait until they stop typing
-        guard !Task.isCancelled else { return }
-        searching = true
-        results = await store.search(q)
-        searching = false
     }
 }

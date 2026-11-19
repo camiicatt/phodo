@@ -99,6 +99,16 @@ final class SupabasePostService: PostService {
         return try await posts(from: rows)
     }
 
+    func posts(tagged tag: String) async throws -> [Post] {
+        // RLS only returns posts I'm allowed to see
+        let rows: [PostRow] = try await client.from("posts").select(Self.select)
+            .filter("tags", operator: "cs", value: "{\(tag)}")
+            .order("created_at", ascending: false)
+            .limit(60)
+            .execute().value
+        return try await posts(from: rows)
+    }
+
     // MARK: writes
 
     func createPost(_ draft: PostDraft, by me: Person) async throws -> Post {
@@ -149,6 +159,11 @@ final class SupabasePostService: PostService {
         try await client.from("posts").delete().eq("id", value: id).execute()
         let paths = rows.flatMap { [$0.image_path, $0.thumb_path] }.compactMap { $0 }
         if !paths.isEmpty { _ = try? await client.storage.from(bucket).remove(paths: paths) }
+    }
+
+    func setVisibility(_ id: UUID, to visibility: PostVisibility) async throws {
+        try await client.from("posts").update(["visibility": visibility.rawValue])
+            .eq("id", value: id).execute()
     }
 
     // MARK: helpers

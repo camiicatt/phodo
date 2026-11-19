@@ -84,6 +84,12 @@ final class AppStore {
     func start() async {
         guard !started else { return }   // SwiftUI can re-run .task; only start once
         started = true
+        #if DEBUG
+        // simulator testing only: `-demoSignedIn` skips sign-up in the keyless demo copy
+        if !isLive && ProcessInfo.processInfo.arguments.contains("-demoSignedIn") {
+            me = SampleData.me; phase = .ready; await load(); return
+        }
+        #endif
         guard let uid = await account.restore() else { phase = .signedOut; return }
         await enter(uid)
     }
@@ -154,6 +160,9 @@ final class AppStore {
 
     func finishOnboarding() async {
         await saveProfile()
+        // ask right away (not only once you have friends), so even your very
+        // first friend request reaches you as a notification
+        _ = await PushDelegate.requestAndRegister()
         phase = .ready
         await load()
     }
@@ -209,7 +218,16 @@ final class AppStore {
         if !friends.isEmpty { _ = await PushDelegate.requestAndRegister() }
         await PushDelegate.registerIfAllowed()
         loadError = problems.isEmpty ? nil : "couldn't load \(problems.joined(separator: ", ")). pull down to retry"
+        prefetchPhotos()
         print("[phodo] loaded: \(myPosts.count) posts, \(connections.count) connections, \(boards.count) boards, feed \(feed.count), explore \(explore.count)")
+    }
+
+    /// Start downloading feed / profile thumbnails and avatars in the background,
+    /// so they're already on the phone by the time you scroll to them.
+    func prefetchPhotos() {
+        let posts = feed + explore + myPosts + Array(boardPosts.values)
+        let urls = posts.compactMap(\.thumbURL) + (posts.map(\.author) + connections.map(\.person)).compactMap(\.avatarURL)
+        Task { await ImageCache.shared.prefetch(urls) }
     }
 
     func refreshFeeds() async throws {
@@ -239,6 +257,20 @@ final class AppStore {
         for i in boards.indices { boards[i].postIDs.removeAll { $0 == post.id } }
     }
 
+    /// Move one of my posts between friends / everyone / just me.
+    func setVisibility(_ post: Post, to visibility: PostVisibility) async {
+        guard post.visibility != visibility else { return }
+        func apply(_ v: PostVisibility) {
+            if let i = myPosts.firstIndex(where: { $0.id == post.id }) { myPosts[i].visibility = v }
+            if let i = explore.firstIndex(where: { $0.id == post.id }) { explore[i].visibility = v }
+            if v != .everyone { explore.removeAll { $0.id == post.id } }
+        }
+        let before = post.visibility
+        apply(visibility)                         // feels instant
+        do { try await service.setVisibility(post.id, to: visibility) }
+        catch { apply(before); report("changing who sees it", error) }
+    }
+
     func post(_ id: UUID) -> Post? {
         myPosts.first { $0.id == id } ?? feed.first { $0.id == id }
             ?? explore.first { $0.id == id } ?? boardPosts[id]
@@ -265,6 +297,37 @@ final class AppStore {
         }
     }
 
+    // MARK: comments
+
+    func comments(on post: Post) async -> [Comment] {
+        (try? await social.comments(on: post.id)) ?? []
+    }
+
+    /// Checks the text, posts it, and pings the post's owner.
+    /// Throws `CommentRules.Problem` when it's empty, too long, or not kind.
+    func addComment(_ text: String, on post: Post) async throws -> Comment {
+        if let problem = CommentRules.problem(with: text) { throw problem }
+        let comment = Comment(id: UUID(), postID: post.id, author: me,
+                              text: text.trimmingCharacters(in: .whitespacesAndNewlines))
+        try await social.addComment(comment)
+        if post.author.id != me.id { Task { await social.notify("comment", id: comment.id) } }
+        return comment
+    }
+
+    /// You can delete your own comments, and any comment on your own post.
+    func canDelete(_ comment: Comment, on post: Post) -> Bool {
+        comment.author.id == me.id || post.author.id == me.id
+    }
+
+    func deleteComment(_ comment: Comment) async {
+        do { try await social.deleteComment(comment.id) } catch { report("deleting the comment", error) }
+    }
+
+    func reportComment(_ comment: Comment) async {
+        try? await social.report(post: comment.postID, user: comment.author.id,
+                                 reason: "comment: \(comment.text)")
+    }
+
     // MARK: other people
 
     func profile(of id: UUID) async -> Person? { try? await account.profile(id) }
@@ -287,6 +350,33 @@ final class AppStore {
         let hadFriends = Set(friends.map(\.id))
         connections = fresh
         if Set(friends.map(\.id)) != hadFriends { try? await refreshFeeds() }
+    }
+
+    /// "people you may know" (friends of friends).
+    func suggestions() async -> [Suggestion] {
+        (try? await social.suggestions())?.filter { status(of: $0.id) == nil } ?? []
+    }
+
+    /// Posts with this #tag I can see.
+    func posts(tagged tag: String) async -> [Post] {
+        let clean = Self.cleanTag(tag)
+        guard !clean.isEmpty else { return [] }
+        let found = (try? await service.posts(tagged: clean)) ?? []
+        await noteLikes(for: found)
+        return found
+    }
+
+    /// Same rules as adding a tag on the today screen: lowercase letters, numbers, _.
+    static func cleanTag(_ text: String) -> String {
+        text.lowercased().filter { $0.isLetter || $0.isNumber || $0 == "_" }
+    }
+
+    /// Tags people around you use most (feed, explore, yours), topped up with starters.
+    var popularTags: [String] {
+        let counts = Dictionary((feed + explore + myPosts).flatMap(\.tags).map { ($0, 1) }, uniquingKeysWith: +)
+        let top = counts.sorted { ($0.value, $1.key) > ($1.value, $0.key) }.map(\.key)
+        var seen = Set<String>()
+        return (top + SampleData.starterTags).filter { seen.insert($0).inserted }.prefix(10).map { $0 }
     }
 
     func search(_ query: String) async -> [Person] {
@@ -336,14 +426,22 @@ final class AppStore {
 
     func isSaved(_ postID: UUID) -> Bool { boards.contains { $0.postIDs.contains(postID) } }
 
+    /// Where hold-to-save puts things: the board you saved to last, else your first board.
+    var quickSaveBoard: Board? {
+        if let id = defaults.string(forKey: "lastBoardID").flatMap(UUID.init(uuidString:)),
+           let board = boards.first(where: { $0.id == id }) { return board }
+        return boards.first
+    }
+
     func toggle(_ postID: UUID, in boardID: UUID) async {
         guard let i = boards.firstIndex(where: { $0.id == boardID }) else { return }
         if let j = boards[i].postIDs.firstIndex(of: postID) {
             boards[i].postIDs.remove(at: j)
-            do { try await social.unsave(postID, from: boardID) } catch { report("removing from board", error) }
+            do { try await social.unsave(postID, from: boardID) } catch { report("removing from the scrapbook", error) }
         } else {
             boards[i].postIDs.insert(postID, at: 0)
-            do { try await social.save(postID, to: boardID) } catch { report("saving to board", error) }
+            defaults.set(boardID.uuidString, forKey: "lastBoardID")   // hold-to-save goes here next time
+            do { try await social.save(postID, to: boardID) } catch { report("saving to the scrapbook", error) }
         }
     }
 
@@ -356,7 +454,7 @@ final class AppStore {
             boards.append(board)
             return board
         } catch {
-            report("making a board", error)
+            report("making a scrapbook", error)
             return nil
         }
     }

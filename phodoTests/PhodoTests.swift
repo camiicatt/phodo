@@ -56,6 +56,53 @@ final class PhotoProcessorTests: XCTestCase {
         XCTAssertEqual(turned.width, base.height)
         XCTAssertEqual(turned.height, base.width)
     }
+
+    /// Left half black, right half white, 400 x 200.
+    private func halves() -> CGImage {
+        let img = UIGraphicsImageRenderer(size: CGSize(width: 400, height: 200), format: {
+            let f = UIGraphicsImageRendererFormat(); f.scale = 1; return f }()).image { ctx in
+            UIColor.black.setFill(); ctx.fill(CGRect(x: 0, y: 0, width: 200, height: 200))
+            UIColor.white.setFill(); ctx.fill(CGRect(x: 200, y: 0, width: 200, height: 200))
+        }
+        return img.cgImage!
+    }
+
+    /// Average brightness (0 black … 1 white), measured by drawing into a small known RGBA bitmap.
+    private func brightness(_ image: CGImage) -> Double {
+        let n = 8
+        var px = [UInt8](repeating: 0, count: n * n * 4)
+        let ctx = CGContext(data: &px, width: n, height: n, bitsPerComponent: 8, bytesPerRow: n * 4,
+                            space: CGColorSpaceCreateDeviceRGB(),
+                            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+        ctx.draw(image, in: CGRect(x: 0, y: 0, width: n, height: n))
+        var sum = 0
+        for i in 0..<(n * n) { sum += Int(px[i * 4]) + Int(px[i * 4 + 1]) + Int(px[i * 4 + 2]) }
+        return Double(sum) / Double(n * n * 3 * 255)
+    }
+
+    func testZoomCropsSmallerAndPanPicksTheSide() {
+        let base = halves()
+        var s = EditSettings()
+        s.aspect = .square
+        XCTAssertEqual(PhotoEditor.render(base, s).width, 200, "square fits the 200px height")
+        s.zoom = 2
+        let zoomed = PhotoEditor.render(base, s)
+        XCTAssertEqual(zoomed.width, 100, "2x zoom → half the crop")
+        s.pan = CGPoint(x: 1, y: 0)                  // look all the way right
+        XCTAssertGreaterThan(brightness(PhotoEditor.render(base, s)), 0.9, "right side is white")
+        s.pan = CGPoint(x: -1, y: 0)                 // all the way left
+        XCTAssertLessThan(brightness(PhotoEditor.render(base, s)), 0.2, "left side is black")
+    }
+
+    func testEveryFilterKeepsTheSize() throws {
+        let base = try XCTUnwrap(PhotoProcessor.downsample(photoWithGPS()))
+        for mood in EditSettings.Mood.allCases {
+            var s = EditSettings(); s.mood = mood
+            let out = PhotoEditor.render(base, s)
+            XCTAssertEqual(out.width, base.width, "\(mood)")
+            XCTAssertEqual(out.height, base.height, "\(mood)")
+        }
+    }
 }
 
 final class ThemeTests: XCTestCase {
@@ -90,6 +137,10 @@ final class ThemeTests: XCTestCase {
             XCTAssertGreaterThanOrEqual(contrast(t.softInk, t.card), 4.5, "\(preset.id): softInk on card")
             XCTAssertGreaterThanOrEqual(contrast(t.bg, t.ink), 7, "\(preset.id): button text")
             XCTAssertGreaterThanOrEqual(contrast(t.frame, t.bg), 1.4, "\(preset.id): photo frame stands out from the page")
+            // the shaded sheets (your people, search)
+            XCTAssertGreaterThanOrEqual(contrast(t.ink, t.shade), 7, "\(preset.id): ink on shade")
+            XCTAssertGreaterThanOrEqual(contrast(t.softInk, t.shade), 4.5, "\(preset.id): softInk on shade")
+            XCTAssertGreaterThanOrEqual(contrast(t.card, t.shade), 1.1, "\(preset.id): cards show on shade")
         }
     }
 
@@ -114,9 +165,10 @@ final class ThemeTests: XCTestCase {
         let author = Person(id: UUID(), username: "brucious", displayName: "bruce")
         let post = Post(id: UUID(), author: author, day: .today, caption: "golden hour on the walk home",
                         tags: ["sunset"], visibility: .friends, image: photo, aspect: 4.0 / 3.0, tint: nil)
+        let store = AppStore(defaults: UserDefaults(suiteName: UUID().uuidString)!)
         let pair = HStack(spacing: 0) {
             ForEach([ThemePreset.lavender, ThemePreset.darks[0]]) { preset in
-                PhotoViewer(post: post).environment(\.theme, Theme(preset: preset))
+                PhotoViewer(post: post).environment(\.theme, Theme(preset: preset)).environment(store)
                     .frame(width: 393, height: 852)
             }
         }
@@ -213,6 +265,19 @@ final class PostingTests: XCTestCase {
         _ = try await service.createPost(draft("two"), by: me)
         let mine = try await service.myPosts(me)
         XCTAssertEqual(mine.filter { $0.day == .today }.count, 2)
+    }
+
+    func testCanChangeWhoSeesAPostAfterPosting() async throws {
+        let service = MockPostService(me: me, seed: false)
+        let post = try await service.createPost(draft("hi", .friends), by: me)
+        try await service.setVisibility(post.id, to: .everyone)
+        var explore = try await service.explore()
+        XCTAssertTrue(explore.contains { $0.id == post.id }, "switched to everyone → shows in explore")
+        try await service.setVisibility(post.id, to: .justMe)
+        explore = try await service.explore()
+        XCTAssertFalse(explore.contains { $0.id == post.id })
+        let mine = try await service.myPosts(me)
+        XCTAssertEqual(mine.first { $0.id == post.id }?.visibility, .justMe)
     }
 
     func testCanFillInAMissedDay() async throws {
@@ -381,5 +446,92 @@ final class FriendTests: XCTestCase {
         store.markFeedSeen()
         XCTAssertEqual(store.newFeedCount, 0, "after looking at the feed nothing is new")
         UserDefaults.standard.removeObject(forKey: "feedSeenAt")
+    }
+}
+
+final class ImageCacheTests: XCTestCase {
+    func testSamePhotoWithNewLinkSharesTheCacheKey() {
+        let a = URL(string: "https://x.supabase.co/storage/v1/object/sign/posts/u/p-thumb.jpg?token=AAA")!
+        let b = URL(string: "https://x.supabase.co/storage/v1/object/sign/posts/u/p-thumb.jpg?token=BBB")!
+        let other = URL(string: "https://x.supabase.co/storage/v1/object/sign/posts/u/q-thumb.jpg?token=AAA")!
+        XCTAssertEqual(ImageCache.key(for: a), ImageCache.key(for: b), "expiring token doesn't matter")
+        XCTAssertNotEqual(ImageCache.key(for: a), ImageCache.key(for: other))
+    }
+
+    func testLoadedPhotoIsCachedAfterwards() async throws {
+        let png = UIGraphicsImageRenderer(size: CGSize(width: 20, height: 20)).pngData { ctx in
+            UIColor.purple.setFill(); ctx.fill(CGRect(x: 0, y: 0, width: 20, height: 20))
+        }
+        let file = FileManager.default.temporaryDirectory.appendingPathComponent("phodo-cache-\(UUID()).png")
+        try png.write(to: file)
+        XCTAssertNil(ImageCache.cached(file))
+        let loaded = await ImageCache.shared.image(for: file)
+        XCTAssertNotNil(loaded)
+        XCTAssertNotNil(ImageCache.cached(file), "second time is instant, from memory")
+    }
+}
+
+
+final class CommentRulesTests: XCTestCase {
+    func testNiceCommentsGoThrough() {
+        for ok in ["so cute", "awww", "love this", "OBSESSED!!", "the vibes 🥹", "core memory",
+                   "pass the class", "assessment day", "raccoon!!", "scrumptious", "cocktail hour",
+                   "push it real good", "spicy ramen", "pussycat", "hell yeah", "mini giraffe"] {
+            XCTAssertNil(CommentRules.problem(with: ok), ok)
+        }
+    }
+
+    func testCussingAndHateAreStopped() {
+        for bad in ["fuck", "so fucking cute", "sh1t", "what the fck", "@ss", "a$$hole", "b1tch",
+                    "wtf", "kys", "k y s", "kill yourself", "k1ll urself", "f a g g o t", "retarded",
+                    "FUUUCK", "shiiit", "n1gga", "dumbass"] {
+            XCTAssertEqual(CommentRules.problem(with: bad), .notNice, bad)
+        }
+    }
+
+    func testLengthRules() {
+        XCTAssertEqual(CommentRules.problem(with: "   "), .empty)
+        XCTAssertEqual(CommentRules.problem(with: String(repeating: "a", count: 31)), .tooLong)
+        XCTAssertNil(CommentRules.problem(with: String(repeating: "a", count: 30)))
+    }
+
+    @MainActor
+    func testCommentingInDemoMode() async throws {
+        let store = AppStore(defaults: UserDefaults(suiteName: UUID().uuidString)!)
+        let post = SampleData.friendPosts()[0]
+        let before = await store.comments(on: post)
+        let c = try await store.addComment("  so cute  ", on: post)
+        XCTAssertEqual(c.text, "so cute")
+        let after = await store.comments(on: post)
+        XCTAssertEqual(after.count, before.count + 1)
+        do { _ = try await store.addComment("wtf", on: post); XCTFail("should be stopped") }
+        catch { XCTAssertEqual(error as? CommentRules.Problem, .notNice) }
+        XCTAssertTrue(store.canDelete(c, on: post))
+        XCTAssertFalse(store.canDelete(before[0], on: post))
+    }
+}
+
+final class SearchAndSuggestionTests: XCTestCase {
+    @MainActor
+    func testTagSearchFindsOnlyThatTag() async {
+        let store = AppStore(defaults: UserDefaults(suiteName: UUID().uuidString)!)
+        await store.load()
+        let food = await store.posts(tagged: "#Food")      // cleaned like the today screen
+        XCTAssertFalse(food.isEmpty)
+        XCTAssertTrue(food.allSatisfy { $0.tags.contains("food") })
+        XCTAssertTrue(store.popularTags.contains("food"))
+        XCTAssertLessThanOrEqual(store.popularTags.count, 10)
+    }
+
+    @MainActor
+    func testSuggestionsSkipPeopleYouAlreadyKnow() async {
+        let store = AppStore(defaults: UserDefaults(suiteName: UUID().uuidString)!)
+        await store.load()
+        let first = await store.suggestions()
+        XCTAssertFalse(first.isEmpty)
+        XCTAssertTrue(first.allSatisfy { store.status(of: $0.id) == nil })
+        await store.addFriend(first[0].person)
+        let after = await store.suggestions()
+        XCTAssertFalse(after.contains { $0.id == first[0].id })
     }
 }

@@ -17,7 +17,10 @@ struct TodayView: View {
     @State private var edits = EditSettings()
     @State private var edited: UIImage?             // what the drop zone shows
     @State private var showCamera = false
-    @State private var showEditor = false
+    /// Which editor to show. Carries "is this a fresh pic?" with it, so the screen
+    /// never opens with a stale value ("look good? / toss it" vs "edit / cancel").
+    struct EditorRequest: Identifiable { let id = UUID(); let isNew: Bool }
+    @State private var editor: EditorRequest?
 
     // text
     @State private var caption = ""
@@ -32,6 +35,20 @@ struct TodayView: View {
     @State private var justPosted = false
     @State private var postedCount = 0      // vibration on each successful post
     @State private var writingWords = false  // "just write" without a pic
+    @State private var promptPick = Int.random(in: 0..<100)   // which caption prompt to show
+
+    /// Little nudges for the caption box; a different one each post.
+    private static let photoPrompts = [
+        "caption this masterpiece…", "what's the lore behind this?", "tell us everything…",
+        "describe the vibe…", "so the story goes…",
+    ]
+    private static let wordPrompts = [
+        "today in one sentence…", "what's living in your head today?", "dear diary…", "spill it ✎",
+    ]
+    private var captionPrompt: String {
+        let list = edited == nil ? Self.wordPrompts : Self.photoPrompts
+        return list[promptPick % list.count]
+    }
 
     /// The details (caption, tags, who sees it, post) only show once there's something to post.
     private var hasDraft: Bool { edited != nil || writingWords }
@@ -57,13 +74,18 @@ struct TodayView: View {
         .fullScreenCover(isPresented: $showCamera) {
             CameraPicker { image in
                 PhotoSaver.save(image)       // keep a copy in their Photos, full quality
-                if let data = image.jpegData(compressionQuality: 0.95) { setBase(PhotoProcessor.downsample(data)) }
+                if let data = image.jpegData(compressionQuality: 0.95) {
+                    setBase(PhotoProcessor.downsample(data))
+                    if baseImage != nil { openFreshEditor(after: .milliseconds(300)) }   // after the camera slides away
+                }
             }
             .ignoresSafeArea()
         }
-        .fullScreenCover(isPresented: $showEditor) {
+        .fullScreenCover(item: $editor) { request in
             if let baseImage {
-                PhotoEditView(base: baseImage, settings: $edits) { renderEdits() }
+                PhotoEditView(base: baseImage, settings: $edits, isNew: request.isNew,
+                              onDone: { renderEdits() },
+                              onToss: { withAnimation(.spring(response: 0.45, dampingFraction: 0.85)) { clearPhoto() } })
                     .environment(\.theme, theme)
             }
         }
@@ -112,7 +134,7 @@ struct TodayView: View {
                 Group {
                     VStack(spacing: 10) {
                         FieldLabel("caption")
-                        TextField("", text: $caption, prompt: Text("say whatever...").foregroundStyle(theme.softInk.opacity(0.7)),
+                        TextField("", text: $caption, prompt: Text(captionPrompt).foregroundStyle(theme.softInk.opacity(0.7)),
                                   axis: .vertical)
                             .font(PhFont.body(22)).foregroundStyle(theme.ink)
                             .lineLimit(1...4)
@@ -165,6 +187,14 @@ struct TodayView: View {
                     .buttonStyle(PrimaryButtonStyle())
                     .disabled(isPosting || (edited == nil && caption.trimmingCharacters(in: .whitespaces).isEmpty))
                     .riseIn(3)
+                    if writingWords && edited == nil {
+                        Button("start over") {
+                            captionFocused = false
+                            withAnimation(.spring(response: 0.45, dampingFraction: 0.85)) { resetComposer() }
+                        }
+                        .font(PhFont.mono(13)).foregroundStyle(theme.softInk)
+                        .riseIn(4)
+                    }
                 }
             }
         }
@@ -177,24 +207,17 @@ struct TodayView: View {
             VStack(spacing: 12) {
                 PhotoTile(image: edited, aspect: edited.size.height / max(edited.size.width, 1))
                 HStack(spacing: 10) {
-                    Button { showEditor = true } label: { TagChip(text: "edit") }.buttonStyle(SquishStyle())
+                    Button { editor = EditorRequest(isNew: false) } label: { TagChip(text: "edit") }.buttonStyle(SquishStyle())
                     PhotosPicker(selection: $pickerItem, matching: .images) { TagChip(text: "swap") }
                     Spacer()
                     Button { clearPhoto() } label: { TagChip(text: "remove", dashed: true) }.buttonStyle(SquishStyle())
                 }
             }
         } else {
-            VStack(spacing: 14) {
-                Image(systemName: "plus.circle").font(.system(size: 40, weight: .thin))
-                Text(day == .today ? "drop today's pic" : "drop a pic from \(day.short)").font(PhFont.bold(24))
-                Button {
-                    writingWords.toggle()
-                    if writingWords { Task { try? await Task.sleep(for: .milliseconds(350)); captionFocused = true } }
-                } label: {
-                    Text(writingWords ? "never mind, no words" : "or just write ✎")
-                        .font(PhFont.mono(14)).foregroundStyle(theme.softInk).underline()
-                }
-                .buttonStyle(SquishStyle())
+            VStack(spacing: 18) {
+                Image(systemName: "plus.circle").font(.system(size: 56, weight: .thin))
+                Text(day == .today ? "drop today's pic" : "drop a pic from \(day.short)").font(PhFont.bold(28))
+                    .multilineTextAlignment(.center)
                 HStack(spacing: 10) {
                     if CameraPicker.isAvailable && day == .today {
                         Button { showCamera = true } label: { TagChip(text: "take one", selected: true) }
@@ -204,10 +227,23 @@ struct TodayView: View {
                         TagChip(text: "pick one", selected: !(CameraPicker.isAvailable && day == .today))
                     }
                 }
-                .padding(.top, 6)
+                if !writingWords {
+                    Button {
+                        writingWords = true
+                        Task { try? await Task.sleep(for: .milliseconds(350)); captionFocused = true }
+                    } label: {
+                        Text("or just write ✎").font(PhFont.mono(14)).foregroundStyle(theme.softInk)
+                    }
+                    .buttonStyle(SquishStyle())
+                    .padding(.top, 4)
+                    .transition(.opacity)
+                }
             }
+            .padding(24)
             .foregroundStyle(theme.ink)
-            .frame(maxWidth: .infinity, minHeight: 230)
+            // a big square: the landing is mostly this
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .aspectRatio(1, contentMode: .fit)
             .background(RoundedRectangle(cornerRadius: Metrics.radius + 6, style: .continuous).fill(theme.sunken))
             .overlay(RoundedRectangle(cornerRadius: Metrics.radius + 6, style: .continuous)
                 .stroke(theme.ink, lineWidth: Metrics.line))
@@ -246,6 +282,27 @@ struct TodayView: View {
     private func load(_ item: PhotosPickerItem?) async {
         guard let item, let data = try? await item.loadTransferable(type: Data.self) else { return }
         setBase(PhotoProcessor.downsample(data))
+        if baseImage != nil { openFreshEditor(after: .milliseconds(150)) }   // straight to "look good?"
+    }
+
+    /// Straight to "look good?" after taking / picking a pic.
+    /// Waits until the camera / photo picker has fully slid away (iOS ignores a
+    /// new full-screen view while another is still closing), then opens it.
+    private func openFreshEditor(after delay: Duration) {
+        Task { @MainActor in
+            try? await Task.sleep(for: delay)
+            for _ in 0..<40 where Self.somethingIsPresented() {
+                try? await Task.sleep(for: .milliseconds(50))
+            }
+            editor = EditorRequest(isNew: true)
+        }
+    }
+
+    @MainActor
+    private static func somethingIsPresented() -> Bool {
+        let root = UIApplication.shared.connectedScenes
+            .compactMap { ($0 as? UIWindowScene)?.keyWindow?.rootViewController }.first
+        return root?.presentedViewController != nil
     }
 
     private func setBase(_ image: CGImage?) {
@@ -268,6 +325,7 @@ struct TodayView: View {
     /// After posting: back to the clean landing look.
     private func resetComposer() {
         clearPhoto(); caption = ""; selectedTags = []; errorText = nil; writingWords = false
+        promptPick += 1
     }
 
     private func toggleTag(_ tag: String) {

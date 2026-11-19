@@ -3,10 +3,12 @@ import SwiftUI
 /// One post in any grid (explore, today, profiles, boards).
 /// - double-tap the photo or tap ♡ to love it
 /// - tap the name to see their profile
-/// - hold (or tap ⋯) for: save to board · add friend · report · block · delete
+/// - hold it: save · love · see @them bubbles fan out (slide onto one, let go)
+/// - tap ⋯ for everything else: add friend · report · block · delete
 struct PostCard: View {
     @Environment(AppStore.self) private var store
     @Environment(\.theme) private var theme
+    @Environment(\.holdMenu) private var hold
     let post: Post
     var showAuthor = false
     var showDate = false
@@ -20,6 +22,8 @@ struct PostCard: View {
     @State private var viewing: Person?
     @State private var heartPop = false
     @State private var expanded = false   // full-screen photo
+    @State private var browsingTag: TagRequest?
+    @State private var commenting = false
     @State private var likeTaps = 0      // drives the vibration: only on your taps, never on load
 
     private var isMine: Bool { post.author.id == store.me.id }
@@ -58,8 +62,14 @@ struct PostCard: View {
             if !post.caption.isEmpty {
                 Text(post.caption).font(PhFont.body(post.hasPhoto ? 17 : 21))
             }
-            if !meta.isEmpty {
-                Text(meta).font(PhFont.mono(12)).foregroundStyle(theme.softInk)
+            if !meta.characters.isEmpty {
+                // each #tag is tappable → every post with that tag
+                Text(meta).font(PhFont.mono(12)).foregroundStyle(theme.softInk).tint(theme.softInk)
+                    .environment(\.openURL, OpenURLAction { url in
+                        guard url.scheme == "phodo-tag", let t = url.host() else { return .systemAction }
+                        browsingTag = TagRequest(tag: t)
+                        return .handled
+                    })
             }
             actions
         }
@@ -73,8 +83,10 @@ struct PostCard: View {
                         .stroke(theme.ink, lineWidth: Metrics.line))
             }
         }
-        .contentShape(.contextMenuPreview, RoundedRectangle(cornerRadius: Metrics.radius, style: .continuous))
-        .contextMenu { menu }
+        .scaleEffect(hold?.post?.id == post.id ? 1.03 : 1)
+        .animation(.spring(response: 0.3, dampingFraction: 0.7), value: hold?.post?.id == post.id)
+        .contentShape(Rectangle())
+        .modifier(HoldToPick(post: post, fallback: { saving = true }))
         .sensoryFeedback(.impact(weight: .light), trigger: likeTaps)
         .sheet(isPresented: $saving) {
             SaveToBoardSheet(post: post).environment(\.theme, theme).presentationDetents([.medium, .large])
@@ -84,6 +96,16 @@ struct PostCard: View {
         }
         .sheet(item: $viewing) { person in
             PersonProfileView(person: person).environment(\.theme, theme)
+        }
+        .sheet(isPresented: $commenting) {
+            PostComments(post: post)
+                .environment(\.theme, theme)
+                .presentationDetents([.medium, .large])
+                .presentationBackground(theme.bg)
+        }
+        .sheet(item: $browsingTag) { req in
+            SearchSheet(startTag: req.tag).environment(\.theme, theme.shaded)
+                .presentationBackground(theme.shade)
         }
         .confirmationDialog("report this post?", isPresented: $reporting, titleVisibility: .visible) {
             ForEach(["spam", "mean or bullying", "nudity or sexual", "violence or danger", "something else"], id: \.self) { reason in
@@ -112,11 +134,17 @@ struct PostCard: View {
             }
             .accessibilityLabel(liked ? "unlove" : "love")
 
+            Button { commenting = true } label: {
+                Image(systemName: "bubble.left")
+                    .frame(width: 36, height: 32, alignment: .leading)
+            }
+            .accessibilityLabel("comments")
+
             Button { saving = true } label: {
                 Image(systemName: store.isSaved(post.id) ? "bookmark.fill" : "bookmark")
                     .frame(width: 36, height: 32, alignment: .leading)
             }
-            .accessibilityLabel("save to board")
+            .accessibilityLabel("save to a scrapbook")
 
             Spacer(minLength: 0)
 
@@ -129,14 +157,22 @@ struct PostCard: View {
         .buttonStyle(.plain)
     }
 
-    private var meta: String {
+    /// The latest visibility (the store updates it right away when you change it).
+    private var current: PostVisibility { store.post(post.id)?.visibility ?? post.visibility }
+
+    private var meta: AttributedString {
         var parts: [String] = []
         if showDate { parts.append(post.day.short) } else if post.day != .today { parts.append("for \(post.day.short)") }
-        if post.visibility == .everyone && isMine { parts.append("everyone") }
-        if post.visibility == .justMe { parts.append("just me") }
-        let tags = post.tags.map { "#\($0)" }.joined(separator: " ")
-        if !tags.isEmpty { parts.append(tags) }
-        return parts.joined(separator: " · ")
+        if current == .everyone && isMine { parts.append("everyone") }
+        if current == .justMe { parts.append("just me") }
+        var out = AttributedString(parts.joined(separator: " · "))
+        for (i, t) in post.tags.enumerated() {
+            if i == 0 { if !parts.isEmpty { out += AttributedString(" · ") } } else { out += AttributedString(" ") }
+            var chip = AttributedString("#\(t)")
+            chip.link = URL(string: "phodo-tag://\(t)")
+            out += chip
+        }
+        return out
     }
 
     private func like() {
@@ -155,11 +191,20 @@ struct PostCard: View {
 
     @ViewBuilder
     private var menu: some View {
-        Button { saving = true } label: { Label("save to board", systemImage: "bookmark") }
+        Button { saving = true } label: { Label("save to a scrapbook", systemImage: "bookmark") }
         Button { like() } label: {
             Label(liked ? "unlove" : "love", systemImage: liked ? "heart.slash" : "heart")
         }
         if isMine {
+            Menu {
+                ForEach([PostVisibility.friends, .everyone, .justMe], id: \.self) { v in
+                    Button { Task { await store.setVisibility(post, to: v) } } label: {
+                        if current == v { Label(v.label, systemImage: "checkmark") } else { Text(v.label) }
+                    }
+                }
+            } label: {
+                Label("who sees it: \(current.label)", systemImage: "eye")
+            }
             Button(role: .destructive) { confirmDelete = true } label: { Label("delete post", systemImage: "trash") }
         } else {
             Button { viewing = post.author } label: { Label("see @\(post.author.username)", systemImage: "person") }
@@ -188,7 +233,7 @@ struct SaveToBoardSheet: View {
         VStack(alignment: .leading, spacing: 18) {
             Text("save to…").font(PhFont.title(32))
             if store.boards.isEmpty {
-                Text("no boards yet. make one below").font(PhFont.mono(14)).foregroundStyle(theme.softInk)
+                Text("no scrapbooks yet. make one below").font(PhFont.mono(14)).foregroundStyle(theme.softInk)
             }
             FlowLayout(spacing: 10) {
                 ForEach(store.boards) { board in
@@ -199,7 +244,7 @@ struct SaveToBoardSheet: View {
                 }
             }
             HStack {
-                TextField("new board", text: $newName).font(PhFont.mono(15))
+                TextField("new scrapbook", text: $newName).font(PhFont.mono(15))
                     .textInputAutocapitalization(.never)
                 Button("+ make it") {
                     Task {
@@ -210,7 +255,7 @@ struct SaveToBoardSheet: View {
                 .font(PhFont.mono(15))
                 .disabled(newName.trimmingCharacters(in: .whitespaces).isEmpty)
             }
-            Text("◎ = public board, shows on your profile").font(PhFont.mono(12)).foregroundStyle(theme.softInk)
+            Text("◎ = public scrapbook, shows on your profile").font(PhFont.mono(12)).foregroundStyle(theme.softInk)
             InkLine()
             Button("done") { dismiss() }.buttonStyle(PrimaryButtonStyle())
             Spacer(minLength: 0)
@@ -220,4 +265,63 @@ struct SaveToBoardSheet: View {
         .phodoPage()
         .sensoryFeedback(.success, trigger: saves)
     }
+}
+
+/// Hold a post, then slide onto a bubble. Uses UIKit's long-press recognizer
+/// (iOS 18+) because it shares nicely with scrolling and keeps reporting where
+/// your finger is; SwiftUI's own drag gesture blocks the feed from scrolling.
+private struct HoldToPick: ViewModifier {
+    @Environment(AppStore.self) private var store
+    @Environment(\.holdMenu) private var hold
+    let post: Post
+    let fallback: () -> Void
+
+    func body(content: Content) -> some View {
+        if #available(iOS 18.0, *), let hold {
+            content.gesture(HoldRecognizer { phase, point in
+                switch phase {
+                case .began: hold.open(post, at: point)
+                case .moved: hold.move(to: point)
+                case .ended:
+                    if let (choice, held) = hold.release() {
+                        Task { await hold.perform(choice, on: held, store: store) }
+                    }
+                case .cancelled: _ = hold.cancel()
+                }
+            })
+        } else {
+            // older iOS: hold just opens the board picker
+            content.onLongPressGesture(minimumDuration: 0.35) { fallback() }
+        }
+    }
+}
+
+@available(iOS 18.0, *)
+private struct HoldRecognizer: UIGestureRecognizerRepresentable {
+    enum Phase { case began, moved, ended, cancelled }
+    let onChange: (Phase, CGPoint) -> Void
+
+    func makeUIGestureRecognizer(context: Context) -> UILongPressGestureRecognizer {
+        let r = UILongPressGestureRecognizer()
+        r.minimumPressDuration = 0.35
+        r.allowableMovement = 10          // moving sooner than that = you meant to scroll
+        return r
+    }
+
+    func handleUIGestureRecognizerAction(_ r: UILongPressGestureRecognizer, context: Context) {
+        let point = r.location(in: nil)   // window = screen coordinates
+        switch r.state {
+        case .began: onChange(.began, point)
+        case .changed: onChange(.moved, point)
+        case .ended: onChange(.ended, point)
+        case .cancelled, .failed: onChange(.cancelled, point)
+        default: break
+        }
+    }
+}
+
+/// Which #tag a post's tag link asked to open.
+struct TagRequest: Identifiable {
+    let tag: String
+    var id: String { tag }
 }

@@ -3,9 +3,13 @@ import SwiftUI
 /// Full-screen photo: pinch to zoom, double-tap to zoom in/out,
 /// swipe down (or tap ✕) to close.
 struct PhotoViewer: View {
+    @Environment(AppStore.self) private var store
     @Environment(\.theme) private var theme
     @Environment(\.dismiss) private var dismiss
     let post: Post
+
+    @State private var comments: [Comment] = []
+    @State private var showComments = false
 
     @State private var scale: CGFloat = 1
     @State private var lastScale: CGFloat = 1
@@ -70,6 +74,9 @@ struct PhotoViewer: View {
                     .padding(.top, 4)
                     .opacity(zoomed ? 0 : 1)
 
+                CommentsPreview(comments: comments) { showComments = true }
+                    .opacity(zoomed ? 0 : 1)
+
                 Spacer(minLength: 24)
             }
             .padding(.horizontal, Metrics.margin)
@@ -90,6 +97,14 @@ struct PhotoViewer: View {
             .opacity(pulled > 0 ? 0 : 1)
         }
         .animation(.easeOut(duration: 0.15), value: zoomed)
+        .animation(.easeOut(duration: 0.2), value: comments.count)
+        .task { comments = await store.comments(on: post) }
+        .sheet(isPresented: $showComments) {
+            CommentsSheet(post: post, comments: $comments)
+                .environment(\.theme, theme)
+                .presentationDetents([.medium, .large])
+                .presentationBackground(theme.bg)
+        }
         .preferredColorScheme(theme.isDark ? .dark : .light)
     }
 
@@ -98,17 +113,15 @@ struct PhotoViewer: View {
         if let image = post.image {
             Image(uiImage: image).resizable().scaledToFit()
         } else if let url = post.fullURL ?? post.thumbURL {
-            AsyncImage(url: url) { phase in
-                if let image = phase.image {
-                    image.resizable().scaledToFit()
-                } else {
-                    // show the small version (or its color) while the full one loads
-                    AsyncImage(url: post.thumbURL) { thumb in
-                        thumb.image?.resizable().scaledToFit()
+            // holds the photo's shape; the small version (already cached from the
+            // feed) shows right away, then the full size fades in over it
+            (post.tint ?? theme.photoTint)
+                .aspectRatio(1 / post.aspect, contentMode: .fit)
+                .overlay {
+                    CachedImage(url: url) {
+                        CachedImage(url: post.thumbURL)
                     }
-                    .overlay(ProgressView().tint(theme.ink))
                 }
-            }
         } else {
             Rectangle().fill(post.tint ?? theme.photoTint).aspectRatio(1 / post.aspect, contentMode: .fit)
         }

@@ -7,6 +7,8 @@ protocol SocialService {
     // friends
     func connections() async throws -> [Connection]
     func search(_ query: String) async throws -> [Person]
+    /// Friends of my friends I'm not connected to yet, most mutual friends first.
+    func suggestions() async throws -> [Suggestion]
     func request(_ id: UUID) async throws
     func accept(_ id: UUID) async throws
     /// Unfriend, cancel a request, or decline one.
@@ -27,6 +29,13 @@ protocol SocialService {
     func like(_ postID: UUID) async throws
     func unlike(_ postID: UUID) async throws
     func stats(for userID: UUID) async throws -> ProfileStats
+
+    // comments (tiny ones — 30 characters, checked by CommentRules here and in the database)
+    /// Oldest first. Only on posts I'm allowed to see; blocked people's are hidden.
+    func comments(on postID: UUID) async throws -> [Comment]
+    func addComment(_ comment: Comment) async throws
+    /// Mine, or anyone's on my post.
+    func deleteComment(_ id: UUID) async throws
 
     // notifications
     func savePushToken(_ token: String, sandbox: Bool) async throws
@@ -101,6 +110,18 @@ final class SupabaseSocialService: SocialService {
             .order("username").limit(20)
             .execute().value
         return try await people(rows)
+    }
+
+    func suggestions() async throws -> [Suggestion] {
+        struct Row: Decodable {
+            let id: UUID; let username: String; let display_name: String
+            let avatar_path: String?; let mutual: Int
+        }
+        let rows: [Row] = try await client.rpc("suggested_friends").execute().value
+        let persons = try await people(rows.map {
+            ProfileLite(id: $0.id, username: $0.username, display_name: $0.display_name, avatar_path: $0.avatar_path)
+        })
+        return zip(rows, persons).map { Suggestion(person: $1, mutual: $0.mutual) }
     }
 
     func request(_ id: UUID) async throws {
@@ -199,6 +220,40 @@ final class SupabaseSocialService: SocialService {
         return ProfileStats(likes: r.likes, saves: r.saves, friends: r.friends)
     }
 
+    // MARK: comments
+
+    func comments(on postID: UUID) async throws -> [Comment] {
+        struct Row: Decodable {
+            let id: UUID; let post_id: UUID; let body: String; let created_at: Date
+            let author: ProfileLite
+        }
+        let rows: [Row] = try await client.from("comments")
+            .select("id, post_id, body, created_at, author:profiles(\(Self.lite))")
+            .eq("post_id", value: postID.lower)
+            .order("created_at").limit(200)
+            .execute().value
+        let authors = try await people(rows.map(\.author))
+        return zip(rows, authors).map { row, person in
+            Comment(id: row.id, postID: row.post_id, author: person, text: row.body, createdAt: row.created_at)
+        }
+    }
+
+    func addComment(_ comment: Comment) async throws {
+        struct New: Encodable { let id: UUID; let post_id: UUID; let body: String }
+        do {
+            try await client.from("comments")
+                .insert(New(id: comment.id, post_id: comment.postID, body: comment.text)).execute()
+        } catch let error as PostgrestError where error.message.contains("not_nice") {
+            throw CommentRules.Problem.notNice     // the database's filter caught it
+        } catch let error as PostgrestError where error.message.contains("slow_down") {
+            throw CommentRules.Problem.slowDown
+        }
+    }
+
+    func deleteComment(_ id: UUID) async throws {
+        try await client.from("comments").delete().eq("id", value: id.lower).execute()
+    }
+
     // MARK: notifications
 
     func savePushToken(_ token: String, sandbox: Bool) async throws {
@@ -229,7 +284,7 @@ final class SupabaseSocialService: SocialService {
     }
 
     func notify(_ kind: String, id: UUID) async {
-        let key = kind == "post" ? "post_id" : "to"
+        let key = kind == "post" ? "post_id" : (kind == "comment" ? "comment_id" : "to")
         do {
             try await client.functions.invoke("notify", options: FunctionInvokeOptions(body: ["type": kind, key: id.lower]))
         } catch {
@@ -270,6 +325,13 @@ final class MockSocialService: SocialService {
         let q = Username.clean(query)
         guard !q.isEmpty else { return [] }
         return (SampleData.friends + SampleData.strangers).filter { $0.username.hasPrefix(q) }
+    }
+
+    func suggestions() async throws -> [Suggestion] {
+        let taken = Set(conns.map(\.id))
+        return SampleData.strangers.enumerated()
+            .filter { !taken.contains($0.element.id) }
+            .map { Suggestion(person: $0.element, mutual: max(1, 3 - $0.offset)) }
     }
 
     func request(_ id: UUID) async throws {
@@ -321,6 +383,25 @@ final class MockSocialService: SocialService {
 
     func unsave(_ postID: UUID, from boardID: UUID) async throws {
         if let i = boardList.firstIndex(where: { $0.id == boardID }) { boardList[i].postIDs.removeAll { $0 == postID } }
+    }
+
+    private var commentsByPost: [UUID: [Comment]] = [:]
+    func comments(on postID: UUID) async throws -> [Comment] {
+        if let c = commentsByPost[postID] { return c }
+        // a little something on demo posts so the sheet isn't empty
+        let seeded = [Comment(id: UUID(), postID: postID, author: SampleData.friends[0], text: "awww so cute",
+                              createdAt: Date().addingTimeInterval(-3600)),
+                      Comment(id: UUID(), postID: postID, author: SampleData.friends[3], text: "the vibes!!",
+                              createdAt: Date().addingTimeInterval(-600))]
+        commentsByPost[postID] = seeded
+        return seeded
+    }
+    func addComment(_ comment: Comment) async throws {
+        if CommentRules.isFlagged(comment.text) { throw CommentRules.Problem.notNice }
+        commentsByPost[comment.postID, default: []].append(comment)
+    }
+    func deleteComment(_ id: UUID) async throws {
+        for k in commentsByPost.keys { commentsByPost[k]?.removeAll { $0.id == id } }
     }
 
     private var muted: Set<UUID> = []
